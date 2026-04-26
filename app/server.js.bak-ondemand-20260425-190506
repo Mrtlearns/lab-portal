@@ -1,0 +1,934 @@
+import express from 'express';
+import { readdir, readFile, writeFile, mkdir, rm, rename, appendFile, stat as statFs } from 'fs/promises';
+import { existsSync } from 'fs';
+import { createHash, randomBytes } from 'crypto';
+import { join, extname } from 'path';
+import fetch from 'node-fetch';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
+import multer from 'multer';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const app = express();
+const PORT = process.env.PORT || 3030;
+const COURSES_DIR = process.env.COURSES_DIR || '/courses';
+const HACKMD_BASE = process.env.HACKMD_BASE || 'https://hackmd.io/@MrT-007';
+
+app.use(express.json());
+
+// ── Multer: store uploaded .md files in /tmp, we move them manually ──────
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 2 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype === 'text/markdown' || extname(file.originalname) === '.md') cb(null, true);
+    else cb(new Error('Only .md files allowed'));
+  }
+});
+
+// ── HackMD cache ──────────────────────────────────────────────────────────
+const cache = new Map();
+const CACHE_TTL = 5 * 60 * 1000;
+
+async function fetchWithCache(url) {
+  const now = Date.now();
+  if (cache.has(url) && cache.get(url).expires > now) return cache.get(url).content;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HackMD fetch failed: ${res.status} ${url}`);
+  const content = await res.text();
+  cache.set(url, { content, expires: now + CACHE_TTL });
+  return content;
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────
+async function readMeta(lab) {
+  const raw = await readFile(join(COURSES_DIR, lab, 'meta.json'), 'utf8');
+  return JSON.parse(raw);
+}
+
+async function writeMeta(lab, meta) {
+  await writeFile(join(COURSES_DIR, lab, 'meta.json'), JSON.stringify(meta, null, 2));
+}
+
+function slugify(name) {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+}
+
+// ── READ endpoints (existing, unchanged contract) ─────────────────────────
+
+// List course codes (skip hidden dirs like .feedback)
+app.get('/api/courses', async (req, res) => {
+  try {
+    const entries = await readdir(COURSES_DIR, { withFileTypes: true });
+    const labs = entries
+      .filter(e => e.isDirectory() && !e.name.startsWith('.'))
+      .map(e => e.name).sort();
+    res.json(labs);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Get course meta
+app.get('/api/courses/:lab/meta', async (req, res) => {
+  try {
+    res.json(await readMeta(req.params.lab));
+  } catch (e) {
+    res.status(404).json({ error: 'Lab not found' });
+  }
+});
+
+// Get step content
+app.get('/api/courses/:lab/step/:index', async (req, res) => {
+  try {
+    const meta = await readMeta(req.params.lab);
+    const idx = parseInt(req.params.index, 10);
+    const step = meta.steps[idx];
+    if (!step) return res.status(404).json({ error: 'Step not found' });
+    let markdown;
+    if (step.slug) {
+      markdown = await fetchWithCache(`${HACKMD_BASE}/${step.slug}/download`);
+    } else if (step.file) {
+      markdown = await readFile(join(COURSES_DIR, req.params.lab, step.file), 'utf8');
+    } else {
+      return res.status(400).json({ error: 'Step has no slug or file' });
+    }
+    res.type('text/plain').send(markdown);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── WRITE endpoints (new) ─────────────────────────────────────────────────
+
+// Create course
+app.post('/api/courses', async (req, res) => {
+  try {
+    const { code, title, description } = req.body;
+    if (!code || !title) return res.status(400).json({ error: 'code and title required' });
+    const dir = join(COURSES_DIR, code);
+    if (existsSync(dir)) return res.status(409).json({ error: 'Course already exists' });
+    await mkdir(dir, { recursive: true });
+    await writeMeta(code, { title, description: description || '', steps: [] });
+    res.status(201).json({ code, title, description: description || '', steps: [] });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Update course metadata
+app.put('/api/courses/:lab/meta', async (req, res) => {
+  try {
+    const meta = await readMeta(req.params.lab);
+    if (req.body.title) meta.title = req.body.title;
+    if (req.body.description !== undefined) meta.description = req.body.description;
+    await writeMeta(req.params.lab, meta);
+    res.json(meta);
+  } catch (e) {
+    res.status(404).json({ error: 'Lab not found' });
+  }
+});
+
+// Delete course
+app.delete('/api/courses/:lab', async (req, res) => {
+  try {
+    await rm(join(COURSES_DIR, req.params.lab), { recursive: true, force: true });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Add step — multipart (file upload) or JSON (HackMD slug)
+app.post('/api/courses/:lab/steps', upload.single('file'), async (req, res) => {
+  try {
+    const meta = await readMeta(req.params.lab);
+    const title = req.body.title || (req.file ? req.file.originalname : 'Untitled');
+
+    if (req.file) {
+      // File upload
+      const filename = req.file.originalname.endsWith('.md')
+        ? req.file.originalname
+        : slugify(title) + '.md';
+      await writeFile(join(COURSES_DIR, req.params.lab, filename), req.file.buffer);
+      meta.steps.push({ title, file: filename });
+    } else if (req.body.slug) {
+      meta.steps.push({ title, slug: req.body.slug });
+    } else {
+      return res.status(400).json({ error: 'Provide a file or slug' });
+    }
+
+    await writeMeta(req.params.lab, meta);
+    res.status(201).json(meta);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Reorder steps
+app.put('/api/courses/:lab/steps/reorder', async (req, res) => {
+  try {
+    const meta = await readMeta(req.params.lab);
+    const { order } = req.body; // e.g. [2, 0, 1]
+    if (!Array.isArray(order) || order.length !== meta.steps.length)
+      return res.status(400).json({ error: 'order array length mismatch' });
+    meta.steps = order.map(i => meta.steps[i]);
+    await writeMeta(req.params.lab, meta);
+    res.json(meta);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Update step (rename title, replace file content, or change slug)
+app.put('/api/courses/:lab/steps/:index', upload.single('file'), async (req, res) => {
+  try {
+    const meta = await readMeta(req.params.lab);
+    const idx = parseInt(req.params.index, 10);
+    if (!meta.steps[idx]) return res.status(404).json({ error: 'Step not found' });
+
+    if (req.body.title) meta.steps[idx].title = req.body.title;
+    if (req.file) {
+      const filename = meta.steps[idx].file || req.file.originalname;
+      await writeFile(join(COURSES_DIR, req.params.lab, filename), req.file.buffer);
+      meta.steps[idx].file = filename;
+      delete meta.steps[idx].slug;
+    }
+    if (req.body.slug) {
+      meta.steps[idx].slug = req.body.slug;
+      delete meta.steps[idx].file;
+    }
+
+    await writeMeta(req.params.lab, meta);
+    res.json(meta);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Delete step
+app.delete('/api/courses/:lab/steps/:index', async (req, res) => {
+  try {
+    const meta = await readMeta(req.params.lab);
+    const idx = parseInt(req.params.index, 10);
+    if (!meta.steps[idx]) return res.status(404).json({ error: 'Step not found' });
+    meta.steps.splice(idx, 1);
+    await writeMeta(req.params.lab, meta);
+    res.json(meta);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Screenshot store (in-memory, per-user) ───────────────────────────────
+// Map: username → { jpeg: Buffer, ts: Date, width: number, height: number }
+const screenshots = new Map();
+
+// Auto-prune stale screenshot entries. When the screenshot agent stops posting
+// (student closed browser / logged off outside the monitor button) the entry
+// otherwise lives forever, so the card would keep showing the last jpeg as
+// "offline". After SCREENSHOT_STALE_MS of silence we drop the entry.
+const SCREENSHOT_STALE_MS           = 10 * 60 * 1000; // 10 min
+const SCREENSHOT_PRUNE_INTERVAL_MS  = 60 * 1000;      // check every 60s
+
+function pruneStaleScreenshots(maxAgeMs = SCREENSHOT_STALE_MS) {
+  const now = Date.now();
+  const pruned = [];
+  for (const [user, e] of screenshots.entries()) {
+    if (now - e.ts > maxAgeMs) {
+      screenshots.delete(user);
+      pruned.push(user);
+    }
+  }
+  return pruned;
+}
+setInterval(() => {
+  const p = pruneStaleScreenshots();
+  if (p.length) console.log(`[monitor] pruned ${p.length} stale screenshot entr${p.length === 1 ? 'y' : 'ies'}: ${p.join(', ')}`);
+}, SCREENSHOT_PRUNE_INTERVAL_MS);
+
+// Debug helper: inject a fake already-stale entry + run the prune function and
+// return what happened. Lets the prune path be verified without waiting.
+app.post('/api/_test/screenshot-prune', (req, res) => {
+  const skip = String(req.query.skip || '') === '1';
+  const injected = 'TEST-STALE-' + Date.now();
+  screenshots.set(injected, { jpeg: Buffer.alloc(1), ts: Date.now() - SCREENSHOT_STALE_MS - 5000, sessionId: null });
+  const beforeMap = [...screenshots.keys()];
+  const pruned = skip ? [] : pruneStaleScreenshots();
+  res.json({
+    injected,
+    beforePrune: beforeMap,
+    ranInlinePrune: !skip,
+    pruned,
+    injectedWasPruned: pruned.includes(injected),
+    remaining: [...screenshots.keys()],
+    thresholdMs: SCREENSHOT_STALE_MS,
+    intervalMs: SCREENSHOT_PRUNE_INTERVAL_MS,
+  });
+});
+
+// POST /api/screenshots/:user  — called by the PowerShell agent every N seconds
+app.post('/api/screenshots/:user', (req, res) => {
+  const chunks = [];
+  req.on('data', c => chunks.push(c));
+  req.on('end', () => {
+    const jpeg = Buffer.concat(chunks);
+    if (!jpeg.length) return res.status(400).json({ error: 'Empty body' });
+    const sessionId = req.headers['x-session-id'] || null;
+    screenshots.set(req.params.user, { jpeg, ts: Date.now(), sessionId });
+    res.json({ ok: true });
+  });
+});
+
+// GET /api/screenshots/:user  — serve latest JPEG for a user
+app.get('/api/screenshots/:user', (req, res) => {
+  const entry = screenshots.get(req.params.user);
+  if (!entry) return res.status(404).json({ error: 'No screenshot yet' });
+  res.set('Content-Type', 'image/jpeg');
+  res.set('Cache-Control', 'no-store');
+  res.set('X-Captured-At', new Date(entry.ts).toISOString());
+  res.send(entry.jpeg);
+});
+
+// GET /api/screenshots  — list all users with screenshots + last-seen ts
+app.get('/api/screenshots', (req, res) => {
+  const STALE_MS = 60 * 1000; // 60 s — beyond this consider offline
+  const now = Date.now();
+  const list = [...screenshots.entries()].map(([user, e]) => ({
+    user,
+    ts: e.ts,
+    age: now - e.ts,
+    online: (now - e.ts) < STALE_MS,
+    sessionId: e.sessionId || null,
+  })).sort((a, b) => a.user.localeCompare(b.user));
+  res.json(list);
+});
+
+
+// ── Shadow endpoint ──────────────────────────────────────────────────────
+// GET /api/shadow/:user — creates a temporary Guacamole RDP connection that
+// shadow-connects to the user's active Windows session (no student notification).
+// Requires: shadow policy set on Windows (Shadow=2), screenshot agent reporting X-Session-Id.
+//
+// Returns: { url: "https://guac.../...#?token=..." } — open in iframe
+const GUAC_ADMIN_PASS = process.env.GUAC_ADMIN_PASS || 'LabAdmin2026!';
+const WIN_RDP_HOST    = process.env.WIN_RDP_HOST    || '10.10.110.49';
+const WIN_RDP_USER    = process.env.WIN_RDP_USER    || 'Administrator';
+const WIN_RDP_PASS    = process.env.WIN_RDP_PASS    || 'Poll0000';
+
+// Track temp shadow connections for cleanup: connectionId → expiry timestamp
+const shadowConnections = new Map();
+
+// Cleanup stale shadow connections every 5 minutes
+setInterval(async () => {
+  const now = Date.now();
+  for (const [connId, expiry] of shadowConnections.entries()) {
+    if (now > expiry) {
+      try {
+        const tok = await getGuacAdminToken();
+        await fetch(`${GUAC_BASE}/api/session/data/mysql/connections/${connId}`, {
+          method: 'DELETE',
+          headers: { 'Guacamole-Token': tok },
+        });
+        shadowConnections.delete(connId);
+        console.log(`[shadow] cleaned up connection ${connId}`);
+      } catch (e) {
+        console.warn(`[shadow] cleanup error for ${connId}:`, e.message);
+      }
+    }
+  }
+}, 5 * 60 * 1000);
+
+async function getGuacAdminToken() {
+  const r = await fetch(`${GUAC_BASE}/api/tokens`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ username: 'guacadmin', password: GUAC_ADMIN_PASS }).toString(),
+  });
+  if (!r.ok) throw new Error(`guacadmin auth failed: ${r.status}`);
+  const d = await r.json();
+  return d.authToken;
+}
+
+app.get('/api/shadow/:user', async (req, res) => {
+  const { user } = req.params;
+  try {
+    // 1. Get session ID from screenshot store
+    const entry = screenshots.get(user);
+    if (!entry || !entry.sessionId) {
+      return res.status(404).json({
+        error: `No session ID for ${user} — is the screenshot agent running?`,
+      });
+    }
+    const sessionId = entry.sessionId;
+
+    // 2. Get guacadmin token
+    const adminToken = await getGuacAdminToken();
+
+    // 3. Create a temporary RDP connection that shadow-connects to the student's session
+    // initial-program runs WITHIN the Administrator RDP session and immediately opens a shadow view
+    const connBody = {
+      name: `shadow-${user}-${Date.now()}`,
+      protocol: 'rdp',
+      parameters: {
+        hostname:        WIN_RDP_HOST,
+        port:            '3389',
+        username:        WIN_RDP_USER,
+        password:        WIN_RDP_PASS,
+        security:        'any',
+        'ignore-cert':   'true',
+        // On connect, silently shadow the student's session (no notification, full control)
+        'cursor':  'remote',
+        'width':   '1920',
+        'height':  '1080',
+        'initial-program': `C:\\Windows\\System32\\cmd.exe /c start /wait C:\\Windows\\System32\\mstsc.exe /shadow:${sessionId} /noconsentprompt /control /f`,
+      },
+      attributes: {
+        'max-connections':          '1',
+        'max-connections-per-user': '1',
+      },
+    };
+
+    const createRes = await fetch(
+      `${GUAC_BASE}/api/session/data/mysql/connections`,
+      {
+        method:  'POST',
+        headers: {
+          'Content-Type':   'application/json',
+          'Guacamole-Token': adminToken,
+        },
+        body: JSON.stringify(connBody),
+      }
+    );
+
+    if (!createRes.ok) {
+      const txt = await createRes.text().catch(() => '');
+      return res.status(502).json({ error: `Guacamole connection create failed: ${createRes.status}`, detail: txt.slice(0, 300) });
+    }
+
+    const conn = await createRes.json();
+    const connectionId = conn.identifier;
+
+    // 4. Schedule cleanup in 30 minutes
+    shadowConnections.set(connectionId, Date.now() + 30 * 60 * 1000);
+
+    // 5. Get a fresh guacadmin token for the URL (token may have changed)
+    const freshToken = await getGuacAdminToken();
+
+    // 6. Build Guacamole URL — encode the connection client ID
+    // Guacamole client ID format: <connectionId> c <dataSource> base64-encoded
+    const clientId = Buffer.from(`${connectionId} c mysql`).toString('base64');
+    const url = `${GUAC_BASE}/#/client/${encodeURIComponent(clientId)}?token=${encodeURIComponent(freshToken)}`;
+
+    res.json({ url, connectionId, sessionId, user });
+
+  } catch (e) {
+    console.error('[shadow] error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Guacamole token proxy ─────────────────────────────────────────────────
+// GET /api/guac-token/:user — server-side: fetches a fresh Guacamole auth token
+// for any user. Bypasses browser cookie conflicts when instructor already has a
+// different Guacamole session cached (e.g. logged in as TRAIN-01, want to view VAS).
+const GUAC_BASE       = process.env.GUAC_BASE || 'https://guac.cox.playsap.us';
+const GUAC_PASS_CFG   = process.env.GUAC_PASS || '123456';
+
+app.get('/api/guac-token/:user', async (req, res) => {
+  const { user } = req.params;
+  try {
+    const r = await fetch(`${GUAC_BASE}/api/tokens`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ username: user, password: GUAC_PASS_CFG }).toString(),
+    });
+    if (!r.ok) {
+      const msg = await r.text().catch(() => '');
+      return res.status(502).json({ error: `Guacamole returned ${r.status}`, detail: msg.slice(0, 200) });
+    }
+    const d = await r.json();
+    res.json({ token: d.authToken, dataSource: d.dataSource, username: d.username });
+  } catch (e) {
+    res.status(502).json({ error: e.message });
+  }
+});
+
+// ── Logoff endpoint ───────────────────────────────────────────────────────
+// POST /api/logoff { users: ["TRAIN-01", ...] }
+// Per user: (1) kill every Guacamole active tunnel owned by that user, and
+// (2) create a short-lived admin RDP connection whose initial-program runs
+// `logoff <sessionId>` to destroy the Windows session. The client opens
+// each returned logoffUrl in a hidden iframe just long enough for the RDP
+// to establish + initial-program to run (~8s) — that is what actually
+// triggers guacd → RDP → logoff.
+async function killGuacTunnelsForUser(user, adminToken) {
+  const r = await fetch(`${GUAC_BASE}/api/session/data/mysql/activeConnections`, {
+    headers: { 'Guacamole-Token': adminToken },
+  });
+  if (!r.ok) return 0;
+  const active = await r.json();
+  const targets = Object.entries(active || {})
+    .filter(([, c]) => (c.username || '').toLowerCase() === user.toLowerCase())
+    .map(([uuid]) => uuid);
+  if (!targets.length) return 0;
+  const pr = await fetch(`${GUAC_BASE}/api/session/data/mysql/activeConnections`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', 'Guacamole-Token': adminToken },
+    body: JSON.stringify(targets.map(uuid => ({ op: 'remove', path: `/${uuid}` }))),
+  });
+  return pr.ok ? targets.length : 0;
+}
+
+app.post('/api/logoff', async (req, res) => {
+  const users = Array.isArray(req.body?.users) ? req.body.users.filter(u => typeof u === 'string' && u) : [];
+  if (!users.length) return res.status(400).json({ error: 'users array required' });
+
+  try {
+    const adminToken = await getGuacAdminToken();
+    const results = [];
+
+    for (const user of users) {
+      const out = { user, tunnelsKilled: 0, sessionId: null, logoffUrl: null, error: null };
+
+      try { out.tunnelsKilled = await killGuacTunnelsForUser(user, adminToken); }
+      catch (e) { out.error = 'tunnel-kill: ' + e.message; }
+
+      const entry = screenshots.get(user);
+      out.sessionId = entry?.sessionId || null;
+
+      if (out.sessionId) {
+        try {
+          const connBody = {
+            name: `logoff-${user}-${Date.now()}`,
+            protocol: 'rdp',
+            parameters: {
+              hostname:      WIN_RDP_HOST,
+              port:          '3389',
+              username:      WIN_RDP_USER,
+              password:      WIN_RDP_PASS,
+              security:      'any',
+              'ignore-cert': 'true',
+              'width':       '800',
+              'height':      '600',
+              'initial-program': `C:\\Windows\\System32\\cmd.exe /c logoff ${out.sessionId}`,
+            },
+            attributes: { 'max-connections': '1', 'max-connections-per-user': '1' },
+          };
+          const createRes = await fetch(
+            `${GUAC_BASE}/api/session/data/mysql/connections`,
+            { method: 'POST', headers: { 'Content-Type': 'application/json', 'Guacamole-Token': adminToken }, body: JSON.stringify(connBody) }
+          );
+          if (!createRes.ok) {
+            const txt = await createRes.text().catch(() => '');
+            out.error = (out.error ? out.error + '; ' : '') + `conn-create ${createRes.status}: ${txt.slice(0, 120)}`;
+          } else {
+            const conn = await createRes.json();
+            shadowConnections.set(conn.identifier, Date.now() + 5 * 60 * 1000); // reuse same 5-min cleanup
+            const freshToken = await getGuacAdminToken();
+            const clientId = Buffer.from(`${conn.identifier} c mysql`).toString('base64');
+            out.logoffUrl = `${GUAC_BASE}/#/client/${encodeURIComponent(clientId)}?token=${encodeURIComponent(freshToken)}`;
+          }
+        } catch (e) {
+          out.error = (out.error ? out.error + '; ' : '') + 'rdp-create: ' + e.message;
+        }
+      }
+
+      // Drop the screenshot entry so the monitor page stops serving the stale
+      // image. If the agent posts once more during the ~12s logoff window we
+      // accept the brief flicker — the Windows session dies moments later.
+      if (out.logoffUrl || out.tunnelsKilled > 0) {
+        screenshots.delete(user);
+      }
+
+      console.log(`[logoff] user=${user} sid=${out.sessionId} tunnels=${out.tunnelsKilled} logoff=${!!out.logoffUrl} err=${out.error || 'none'}`);
+      results.push(out);
+    }
+
+    res.json({ results });
+  } catch (e) {
+    console.error('[logoff] fatal:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Recording control ─────────────────────────────────────────────────────
+// All TRAIN-XX users share one Guacamole connection (Win2025_Students, id 7)
+// via the Students userGroup. To record one user's session without recording
+// the others we maintain a sibling connection Win2025_Students_Rec — identical
+// params plus recording-path / recording-name — and a userGroup Students_Rec
+// that has READ on it. Toggling a user's recording on swaps their group from
+// Students to Students_Rec; toggling off reverses it. Active tunnel is killed
+// either way so the next reconnect picks up the new connection.
+//
+// On first call we lazily ensure both the recording connection and the
+// userGroup exist (idempotent, safe to re-run).
+//
+// API:
+//   POST /api/recording/start { users:[…] } → swap each user into Students_Rec
+//   POST /api/recording/stop  { users:[…] } → swap each user back into Students
+//   GET  /api/recording                     → users currently in Students_Rec
+const RECORDING_PATH_BASE   = process.env.RECORDING_PATH_BASE   || '/var/lib/guacamole/recordings';
+const REC_BASE_CONN_NAME    = process.env.REC_BASE_CONN_NAME    || 'Win2025_Students';
+const REC_RECORDING_CONN    = process.env.REC_RECORDING_CONN    || 'Win2025_Students_Rec';
+const REC_NORMAL_GROUP_NAME = process.env.REC_NORMAL_GROUP_NAME || 'Students';
+const REC_RECORD_GROUP_NAME = process.env.REC_RECORD_GROUP_NAME || 'Students_Rec';
+
+const recordingState = new Map(); // user → { since }
+let recBootstrapped = false;
+let recBootstrapPromise = null;
+
+async function guacGet(path, adminToken) {
+  const r = await fetch(`${GUAC_BASE}${path}`, { headers: { 'Guacamole-Token': adminToken } });
+  if (!r.ok) throw new Error(`GET ${path} → ${r.status}`);
+  return r.json();
+}
+async function guacJson(method, path, body, adminToken) {
+  const r = await fetch(`${GUAC_BASE}${path}`, {
+    method,
+    headers: { 'Content-Type': 'application/json', 'Guacamole-Token': adminToken },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!r.ok) {
+    const txt = await r.text().catch(() => '');
+    throw new Error(`${method} ${path} → ${r.status} ${txt.slice(0, 200)}`);
+  }
+  if (r.status === 204) return null;
+  const t = await r.text();
+  return t ? JSON.parse(t) : null;
+}
+
+async function findConnByName(name, adminToken) {
+  const all = await guacGet('/api/session/data/mysql/connections', adminToken);
+  for (const [id, c] of Object.entries(all || {})) {
+    if ((c.name || '') === name) return { id, conn: c };
+  }
+  return null;
+}
+
+async function ensureRecordingInfra(adminToken) {
+  if (recBootstrapped) return;
+  if (recBootstrapPromise) return recBootstrapPromise;
+  recBootstrapPromise = (async () => {
+    // 1. Find base Win2025_Students connection
+    const base = await findConnByName(REC_BASE_CONN_NAME, adminToken);
+    if (!base) throw new Error(`base connection "${REC_BASE_CONN_NAME}" not found`);
+    // 2. Ensure recording-enabled clone exists
+    let rec = await findConnByName(REC_RECORDING_CONN, adminToken);
+    if (!rec) {
+      const baseParams = await guacGet(`/api/session/data/mysql/connections/${base.id}/parameters`, adminToken);
+      const recParams = {
+        ...baseParams,
+        'recording-path':         RECORDING_PATH_BASE,
+        'recording-name':         '${GUAC_USERNAME}-${GUAC_DATE}-${GUAC_TIME}',
+        'create-recording-path':  'true',
+        'recording-include-keys': 'true',
+      };
+      const created = await guacJson('POST', '/api/session/data/mysql/connections', {
+        name: REC_RECORDING_CONN,
+        parentIdentifier: base.conn.parentIdentifier || 'ROOT',
+        protocol: base.conn.protocol,
+        parameters: recParams,
+        attributes: base.conn.attributes || {},
+      }, adminToken);
+      rec = { id: created.identifier, conn: created };
+      console.log(`[recording] created connection ${REC_RECORDING_CONN} (id=${rec.id})`);
+    }
+    // 3. Ensure Students_Rec userGroup exists + has READ on the recording conn
+    let groupExists = true;
+    try { await guacGet(`/api/session/data/mysql/userGroups/${encodeURIComponent(REC_RECORD_GROUP_NAME)}`, adminToken); }
+    catch (_) { groupExists = false; }
+    if (!groupExists) {
+      await guacJson('POST', '/api/session/data/mysql/userGroups', {
+        identifier: REC_RECORD_GROUP_NAME, attributes: {},
+      }, adminToken);
+      console.log(`[recording] created userGroup ${REC_RECORD_GROUP_NAME}`);
+    }
+    // Always (idempotent) ensure READ permission on the recording conn
+    await guacJson('PATCH', `/api/session/data/mysql/userGroups/${encodeURIComponent(REC_RECORD_GROUP_NAME)}/permissions`, [
+      { op: 'add', path: `/connectionPermissions/${rec.id}`, value: 'READ' },
+    ], adminToken).catch(e => {
+      // 'already exists' style errors are fine; rethrow others
+      if (!/already|exists|conflict/i.test(e.message)) throw e;
+    });
+    recBootstrapped = true;
+  })().finally(() => { recBootstrapPromise = null; });
+  return recBootstrapPromise;
+}
+
+async function setUserGroupMembership(user, group, op, adminToken) {
+  // op: 'add' | 'remove'  — both use `path: "/"` with `value: <user>` for memberUsers
+  return guacJson('PATCH', `/api/session/data/mysql/userGroups/${encodeURIComponent(group)}/memberUsers`,
+    [{ op, path: '/', value: user }],
+    adminToken,
+  );
+}
+
+async function setRecordingForUser(user, enable, adminToken) {
+  await ensureRecordingInfra(adminToken);
+  if (enable) {
+    await setUserGroupMembership(user, REC_RECORD_GROUP_NAME, 'add',    adminToken).catch(e => { if (!/already|exists|conflict/i.test(e.message)) throw e; });
+    await setUserGroupMembership(user, REC_NORMAL_GROUP_NAME, 'remove', adminToken).catch(e => { if (!/not.*found|404/i.test(e.message)) throw e; });
+  } else {
+    await setUserGroupMembership(user, REC_NORMAL_GROUP_NAME, 'add',    adminToken).catch(e => { if (!/already|exists|conflict/i.test(e.message)) throw e; });
+    await setUserGroupMembership(user, REC_RECORD_GROUP_NAME, 'remove', adminToken).catch(e => { if (!/not.*found|404/i.test(e.message)) throw e; });
+  }
+  let tunnelsKilled = 0;
+  try { tunnelsKilled = await killGuacTunnelsForUser(user, adminToken); } catch (_) {}
+  if (enable) recordingState.set(user, { since: Date.now() });
+  else recordingState.delete(user);
+  return { user, enabled: enable, tunnelsKilled };
+}
+
+app.post('/api/recording/start', async (req, res) => {
+  const users = Array.isArray(req.body?.users) ? req.body.users.filter(u => typeof u === 'string' && u) : [];
+  if (!users.length) return res.status(400).json({ error: 'users array required' });
+  try {
+    const adminToken = await getGuacAdminToken();
+    const results = [];
+    for (const u of users) {
+      try { results.push(await setRecordingForUser(u, true, adminToken)); }
+      catch (e) { results.push({ user: u, error: e.message, enabled: false }); }
+    }
+    console.log(`[recording] start: ${results.map(r => `${r.user}=${r.enabled ? 'OK' : (r.error || 'fail')}`).join(' ')}`);
+    res.json({ results });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/recording/stop', async (req, res) => {
+  const users = Array.isArray(req.body?.users) ? req.body.users.filter(u => typeof u === 'string' && u) : [];
+  if (!users.length) return res.status(400).json({ error: 'users array required' });
+  try {
+    const adminToken = await getGuacAdminToken();
+    const results = [];
+    for (const u of users) {
+      try { results.push(await setRecordingForUser(u, false, adminToken)); }
+      catch (e) { results.push({ user: u, error: e.message, enabled: false }); }
+    }
+    console.log(`[recording] stop: ${results.map(r => r.user).join(' ')}`);
+    res.json({ results });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/recording', (req, res) => {
+  const list = [...recordingState.entries()].map(([user, e]) => ({
+    user, since: e.since,
+  })).sort((a, b) => a.user.localeCompare(b.user));
+  res.json({ recording: list, path: RECORDING_PATH_BASE, recordingConn: REC_RECORDING_CONN });
+});
+
+// ── Past recordings (auto-converted .m4v) ─────────────────────────────────
+// A cron on the host converts every fresh .guac to .m4v, so this endpoint
+// only needs to list and label what's on disk.
+//   {name:"TRAIN-01-20260425-104333", user, date, time, sizeMB, ready, raw}
+//   ready = true  → .m4v exists, playable
+//   ready = false → only .guac present (still recording, or conversion pending)
+app.get('/api/recordings', async (req, res) => {
+  try {
+    const entries = await readdir(RECORDING_PATH_BASE).catch(() => []);
+    const byBase = new Map();
+    for (const e of entries) {
+      const base = e.replace(/\.mp4$|\.m4v$|\.mp4\.partial$/, '');
+      const slot = byBase.get(base) || { name: base };
+      if (e.endsWith('.mp4'))                 slot.mp4 = e;
+      else if (e.endsWith('.mp4.partial'))    slot.busy = e;
+      else if (e.endsWith('.m4v'))            slot.busy = e;
+      else if (!e.includes('.'))              slot.guac = e;
+      byBase.set(base, slot);
+    }
+    const out = [];
+    for (const [base, slot] of byBase) {
+      const m = base.match(/^(.+?)-(\d{8})-(\d{6})$/);
+      let stat = null;
+      const target = slot.mp4 || slot.guac || base;
+      try { stat = await statFs(join(RECORDING_PATH_BASE, target)); } catch (_) {}
+      out.push({
+        name: base,
+        user: m ? m[1] : '?',
+        date: m ? `${m[2].slice(0,4)}-${m[2].slice(4,6)}-${m[2].slice(6,8)}` : '?',
+        time: m ? `${m[3].slice(0,2)}:${m[3].slice(2,4)}:${m[3].slice(4,6)}` : '?',
+        sizeMB: stat ? +(stat.size / 1024 / 1024).toFixed(2) : null,
+        ready: !!slot.mp4,
+        converting: !!slot.busy,
+        m4vUrl: slot.mp4 ? `/media/recordings/${slot.mp4}` : null,
+      });
+    }
+    out.sort((a, b) => (b.name).localeCompare(a.name));
+    res.json({ recordings: out });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Re-derive in-memory state from Students_Rec membership at startup so the
+// flag survives container restarts.
+(async () => {
+  try {
+    const tok = await getGuacAdminToken();
+    await ensureRecordingInfra(tok).catch(e => console.warn('[recording] bootstrap warning:', e.message));
+    const members = await guacGet(`/api/session/data/mysql/userGroups/${encodeURIComponent(REC_RECORD_GROUP_NAME)}/memberUsers`, tok)
+      .catch(() => []);
+    const list = Array.isArray(members) ? members : [];
+    list.forEach(u => recordingState.set(u, { since: Date.now() }));
+    if (recordingState.size) {
+      console.log(`[recording] re-derived state for ${recordingState.size} user(s): ${[...recordingState.keys()].join(', ')}`);
+    }
+  } catch (e) {
+    console.warn('[recording] startup derive failed:', e.message);
+  }
+})();
+
+// ── Feedback store ────────────────────────────────────────────────────────
+// Student suggestions / corrections for lab .md content. JSONL file; all
+// mutations serialised through a single promise chain. Status updates are
+// written as write-temp + atomic rename.
+const FEEDBACK_DIR  = join(COURSES_DIR, '.feedback');
+const FEEDBACK_FILE = join(FEEDBACK_DIR, 'feedback.jsonl');
+
+let fbChain = Promise.resolve();
+function runFb(fn) { const p = fbChain.then(fn, fn); fbChain = p.catch(() => {}); return p; }
+
+async function fbEnsureDir() {
+  if (!existsSync(FEEDBACK_DIR)) await mkdir(FEEDBACK_DIR, { recursive: true });
+}
+
+async function fbReadAll() {
+  await fbEnsureDir();
+  if (!existsSync(FEEDBACK_FILE)) return [];
+  const raw = await readFile(FEEDBACK_FILE, 'utf8');
+  const lines = raw.split('\n').filter(l => l.trim());
+  const out = [];
+  for (const l of lines) {
+    try { out.push(JSON.parse(l)); } catch (_) { /* skip torn lines */ }
+  }
+  return out;
+}
+
+async function fbAppend(record) {
+  await fbEnsureDir();
+  await appendFile(FEEDBACK_FILE, JSON.stringify(record) + '\n', 'utf8');
+}
+
+async function fbRewrite(records) {
+  await fbEnsureDir();
+  const tmp = FEEDBACK_FILE + '.tmp-' + Date.now() + '-' + randomBytes(4).toString('hex');
+  await writeFile(tmp, records.map(r => JSON.stringify(r)).join('\n') + (records.length ? '\n' : ''), 'utf8');
+  await rename(tmp, FEEDBACK_FILE);
+}
+
+function fbGenId() {
+  const ts = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14);
+  return 'fb_' + ts + '_' + randomBytes(3).toString('hex');
+}
+
+// Rate-limit: suppress duplicate posts within 60s (same user+course+comment hash)
+const recentPosts = new Map(); // key → expiry
+function rateKey(user, course, comment) {
+  return `${user}|${course}|${createHash('sha1').update(comment).digest('hex').slice(0, 12)}`;
+}
+
+// POST /api/feedback — student submit
+app.post('/api/feedback', async (req, res) => {
+  try {
+    const { course, stepIndex, section, taskNum, incorrectText, user, comment } = req.body || {};
+    if (!course || stepIndex === undefined || stepIndex === null || !user || !comment) {
+      return res.status(400).json({ error: 'course, stepIndex, user, comment are required' });
+    }
+    if (typeof comment !== 'string' || comment.trim().length < 3) {
+      return res.status(400).json({ error: 'comment too short' });
+    }
+    // Rate-limit
+    const k = rateKey(user, course, comment.trim());
+    const now = Date.now();
+    for (const [kk, exp] of recentPosts.entries()) if (exp < now) recentPosts.delete(kk);
+    if (recentPosts.has(k)) return res.status(429).json({ error: 'Duplicate within 60s — already received' });
+    recentPosts.set(k, now + 60000);
+
+    // Look up stepTitle from meta
+    let stepTitle = null;
+    try {
+      const meta = await readMeta(course);
+      stepTitle = meta.steps?.[Number(stepIndex)]?.title ?? null;
+    } catch (_) { /* course may not exist — record anyway */ }
+
+    const rec = {
+      id: fbGenId(),
+      course: String(course),
+      stepIndex: Number(stepIndex),
+      stepTitle,
+      section: section ? String(section).slice(0, 300) : null,
+      taskNum: taskNum ? String(taskNum).slice(0, 20) : null,
+      incorrectText: incorrectText ? String(incorrectText).slice(0, 2000) : null,
+      user: String(user).slice(0, 80),
+      comment: String(comment).slice(0, 5000),
+      originalMarkdown: null,
+      status: 'pending',
+      reviewer: null,
+      reviewNote: null,
+      createdAt: Math.floor(Date.now() / 1000),
+      reviewedAt: null,
+    };
+    await runFb(() => fbAppend(rec));
+    res.status(201).json(rec);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/feedback?course=&status=
+app.get('/api/feedback', async (req, res) => {
+  try {
+    const { course, status } = req.query;
+    const all = await runFb(() => fbReadAll());
+    let out = all;
+    if (course) out = out.filter(r => r.course === course);
+    if (status) out = out.filter(r => r.status === status);
+    out.sort((a, b) => b.createdAt - a.createdAt);
+    res.json(out);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// PUT /api/feedback/:id — instructor updates status / note / originalMarkdown
+app.put('/api/feedback/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, reviewNote, reviewer, originalMarkdown } = req.body || {};
+    if (status && !['pending', 'approved', 'declined'].includes(status)) {
+      return res.status(400).json({ error: 'invalid status' });
+    }
+    const updated = await runFb(async () => {
+      const all = await fbReadAll();
+      const idx = all.findIndex(r => r.id === id);
+      if (idx === -1) throw new Error('not_found');
+      if (status) all[idx].status = status;
+      if (reviewNote !== undefined) all[idx].reviewNote = reviewNote ? String(reviewNote).slice(0, 2000) : null;
+      if (reviewer !== undefined)   all[idx].reviewer   = reviewer   ? String(reviewer).slice(0, 80)   : null;
+      if (originalMarkdown !== undefined) all[idx].originalMarkdown = originalMarkdown || null;
+      if (status === "pending") all[idx].reviewedAt = null;
+      else if (status) all[idx].reviewedAt = Math.floor(Date.now() / 1000);
+      await fbRewrite(all);
+      return all[idx];
+    });
+    res.json(updated);
+  } catch (e) {
+    if (e.message === 'not_found') return res.status(404).json({ error: 'Feedback not found' });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Past recordings: serve converted .m4v files read-only ────────────────
+const RECORDINGS_PUBLIC_DIR = process.env.RECORDINGS_PUBLIC_DIR || RECORDING_PATH_BASE;
+app.use('/media/recordings', express.static(RECORDINGS_PUBLIC_DIR, {
+  fallthrough: false,
+  setHeaders(res) {
+    res.setHeader('Cache-Control', 'private, max-age=300');
+  },
+}));
+
+// ── Static + SPA fallback ─────────────────────────────────────────────────
+app.use(express.static(join(__dirname, 'public')));
+app.get('*', (req, res) => res.sendFile(join(__dirname, 'public', 'index.html')));
+
+app.listen(PORT, () => console.log(`Lab portal running on :${PORT}`));

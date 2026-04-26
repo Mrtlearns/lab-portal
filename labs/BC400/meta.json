@@ -1,0 +1,9 @@
+{
+  "title": "BC 400 — ABAP Workbench Foundations",
+  "description": "Introduction to ABAP development in SAP ABAP 2023",
+  "steps": [
+    { "title": "Exercise 01 — Navigating the ABAP Workbench", "file": "ex01.md" },
+    { "title": "Exercise 02 — Creating a Simple ABAP Report", "file": "ex02.md" },
+    { "title": "Exercise 03 — Debugging with the ABAP Debugger", "file": "ex03.md" }
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "title": "HA215: SAP HANA 2.0 SPS07 — Monitoring and Performance Tools",
+  "description": "SAP HANA 2.0 SPS07 — Using Monitoring and Performance Tools. 10 labs covering emergency analysis, performance root cause analysis, and proactive monitoring.",
+  "steps": [
+    {
+      "title": "Lab 01 — Restart a Crashed System",
+      "file": "Lab-01-Restart-Crashed-System.md"
+    },
+    {
+      "title": "Lab 02 — Troubleshoot an Unreachable System",
+      "file": "Lab-02-Troubleshoot-Unreachable-System.md"
+    },
+    {
+      "title": "Lab 03 — Analyze and Solve a Slow System",
+      "file": "Lab-03-Analyze-Slow-System.md"
+    },
+    {
+      "title": "Lab 04 — Analyze Runtime Errors",
+      "file": "Lab-04-Analyze-Runtime-Errors.md"
+    },
+    {
+      "title": "Lab 05 — Analyze OOM Using SAP HANA Cockpit",
+      "file": "Lab-05-Analyze-OOM-Cockpit.md"
+    },
+    {
+      "title": "Lab 06 — Analyze Performance",
+      "file": "Lab-06-Analyze-Performance.md"
+    },
+    {
+      "title": "Lab 07 — Use Expensive Statement Trace",
+      "file": "Lab-07-Expensive-Statement-Trace.md"
+    },
+    {
+      "title": "Lab 08 — Resolve a Disk Full Situation",
+      "file": "Lab-08-Resolve-Disk-Full.md"
+    },
+    {
+      "title": "Lab 09 — Set Parameters for Workload Management",
+      "file": "Lab-09-Workload-Management.md"
+    },
+    {
+      "title": "Lab 10 — Use SAP HANA Capture and Replay",
+      "file": "Lab-10-Capture-and-Replay.md"
+    }
+  ]
+}

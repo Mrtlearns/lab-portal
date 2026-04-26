@@ -1,0 +1,719 @@
+const GUAC_URL = 'https://lab.training.playsap.us/guacamole/';
+
+let currentCourse = null, currentMeta = null;
+let currentExerciseIdx = 0, currentTaskIdx = 0;
+let taskHeadings = [];
+
+// ── Lab text-size preference ─────────────────────────────────────────────────
+const LAB_FONT_MIN = 10, LAB_FONT_MAX = 26;
+let labFontSize = Math.min(LAB_FONT_MAX, Math.max(LAB_FONT_MIN,
+  parseInt(localStorage.getItem('labFontSize') || '16', 10)));
+
+function applyLabFontSize() {
+  const el = document.getElementById('pane-right');
+  if (el) el.style.fontSize = labFontSize + 'px';
+}
+
+document.getElementById('btn-font-up').addEventListener('click', () => {
+  if (labFontSize < LAB_FONT_MAX) { labFontSize++; localStorage.setItem('labFontSize', labFontSize); applyLabFontSize(); }
+});
+document.getElementById('btn-font-down').addEventListener('click', () => {
+  if (labFontSize > LAB_FONT_MIN) { labFontSize--; localStorage.setItem('labFontSize', labFontSize); applyLabFontSize(); }
+});
+
+applyLabFontSize(); // apply on page load
+
+const params     = new URLSearchParams(location.search);
+const autoUser   = params.get('user');
+const autoCourse = params.get('course') || params.get('lab'); // 'lab' kept for backwards compat
+
+const frame = document.getElementById('guac-frame');
+
+// ── Keyboard focus management ─────────────────────────────────────────────
+let _guacListenersReady = false;
+
+function focusGuacSink() {
+  try {
+    const cw  = frame.contentWindow;
+    const doc = cw && cw.document;
+    if (!doc) return;
+    // Promote the iframe's browsing context before focusing the element —
+    // Chrome ignores t.focus() from parent-realm code when the iframe is
+    // not the active browsing context.
+    cw.focus();
+    for (const t of doc.querySelectorAll('textarea')) {
+      if (t.style.position === 'fixed') { t.focus(); return; }
+    }
+  } catch(e) {}
+}
+
+function setupGuacListeners() {
+  if (_guacListenersReady) { focusGuacSink(); return; }
+  try {
+    const cw  = frame.contentWindow;
+    const doc = cw && cw.document;
+    if (!doc) return;
+    let sink = null;
+    for (const t of doc.querySelectorAll('textarea')) {
+      if (t.style.position === 'fixed') { sink = t; break; }
+    }
+    if (!sink) return; // not ready yet — poller will retry
+
+    _guacListenersReady = true;
+    cw.focus();
+    sink.focus();
+
+    // Inject a recovery script that runs within the iframe's own JS realm.
+    // focus() calls from the parent realm are blocked by Chrome when the
+    // iframe is not the active browsing context; calling from inside the
+    // iframe's own realm bypasses that restriction entirely.
+    const s = doc.createElement('script');
+    s.textContent = `(function(){
+      document.addEventListener('mousedown', function _guacRefocus(){
+        var ts = document.querySelectorAll('textarea');
+        for(var i=0;i<ts.length;i++){
+          if(ts[i].style.position==='fixed'){ ts[i].focus(); return; }
+        }
+      }, true);
+    })();`;
+    (doc.head || doc.documentElement).appendChild(s);
+
+  } catch(e) {}
+}
+
+frame.addEventListener('load', () => {
+  _guacListenersReady = false;
+  // Poll every 500 ms until Guacamole's InputSink textarea appears.
+  // Guacamole initialises and auto-logs-in asynchronously, so the sink
+  // may not exist at a fixed delay after the load event.
+  let _attempts = 0;
+  const _poller = setInterval(() => {
+    _attempts++;
+    setupGuacListeners();
+    if (_guacListenersReady || _attempts >= 40) clearInterval(_poller);
+  }, 500);
+});
+
+if (autoUser) {
+  const pwd = params.get('pass') || '123456';
+  frame.src = `${GUAC_URL}#?username=${encodeURIComponent(autoUser)}&password=${encodeURIComponent(pwd)}`;
+} else {
+  frame.src = GUAC_URL;
+}
+
+marked.setOptions({ breaks: true, gfm: true });
+
+// ── Panel width controls ──────────────────────────────────────────────────
+const split     = document.getElementById('split');
+const btnToggle = document.getElementById('btn-toggle-panel');
+
+function setCols(pct) {
+  const clamped = Math.max(15, Math.min(85, pct));
+  split.style.gridTemplateColumns = clamped + '% 1fr';
+  localStorage.setItem('panel-split', clamped.toFixed(1));
+  return clamped;
+}
+let currentPct = parseFloat(localStorage.getItem('panel-split') || '65');
+setCols(currentPct);
+
+document.getElementById('btn-panel-wider').addEventListener('click', () => { currentPct = setCols(currentPct - 5); });
+document.getElementById('btn-panel-narrower').addEventListener('click', () => { currentPct = setCols(currentPct + 5); });
+
+// ── Panel toggle ──────────────────────────────────────────────────────────
+let panelHidden = false;
+btnToggle.addEventListener('click', () => {
+  panelHidden = !panelHidden;
+  if (panelHidden) {
+    split.style.gridTemplateColumns = '1fr 0';
+    document.getElementById('pane-right').style.display = 'none';
+  } else {
+    setCols(currentPct);
+    document.getElementById('pane-right').style.display = '';
+  }
+  btnToggle.innerHTML = panelHidden ? '&#x21A4;' : '&#x21A6;';
+  btnToggle.title = panelHidden ? 'Show tutorial panel' : 'Hide tutorial panel';
+});
+
+// ── Course loading ────────────────────────────────────────────────────────
+async function loadCourse() {
+  try {
+    if (autoCourse) {
+      await selectCourse(autoCourse);
+    } else {
+      document.getElementById('tutorial-content').innerHTML =
+        '<div class="placeholder">No course specified in URL.<br>Add <code>?course=ADM103</code> to load a course.</div>';
+      document.getElementById('exercise-select').innerHTML = '<option value="">— No course —</option>';
+    }
+  } catch(e) {
+    console.error(e);
+    document.getElementById('tutorial-content').innerHTML =
+      `<div class="placeholder">Failed to load course: ${e.message}</div>`;
+  }
+}
+
+async function selectCourse(course) {
+  currentCourse = course; currentExerciseIdx = 0;
+  currentMeta = await fetch(`/api/courses/${course}/meta`).then(r => r.json());
+  const titleEl = document.getElementById('course-title');
+  if (titleEl) titleEl.textContent = currentMeta.title;
+  populateExerciseSelect();
+  await renderStep(0);
+  openSyncChannel();
+}
+
+function populateExerciseSelect() {
+  const sel = document.getElementById('exercise-select');
+  sel.innerHTML = '';
+  (currentMeta.steps || []).forEach((step, i) => {
+    const o = document.createElement('option');
+    o.value = i;
+    o.textContent = step.title;
+    sel.appendChild(o);
+  });
+  sel.disabled = false;
+  sel.value = 0;
+}
+
+async function renderStep(idx) {
+  if (!currentMeta) return;
+  currentExerciseIdx = idx;
+  const step = currentMeta.steps[idx];
+  if (!step) return;
+
+  // Sync dropdown
+  const sel = document.getElementById('exercise-select');
+  if (sel) sel.value = idx;
+
+  document.getElementById('tutorial-title').textContent = `${currentMeta.title} — ${step.title}`;
+  const content = document.getElementById('tutorial-content');
+  content.innerHTML = '<div class="placeholder">Loading\u2026</div>';
+  taskHeadings = []; currentTaskIdx = 0;
+  try {
+    const md = await fetch(`/api/courses/${currentCourse}/step/${idx}?_=${Date.now()}`, { cache: 'no-store' }).then(r => r.text());
+    content.innerHTML = marked.parse(md);
+    postRender(content);
+    content.scrollTop = 0;
+  } catch(e) {
+    content.innerHTML = `<div class="placeholder">Error: ${e.message}</div>`;
+  }
+  updateStepCounter();
+  broadcastStep(idx);
+}
+
+// ── Post-render ───────────────────────────────────────────────────────────
+function postRender(el) {
+  el.querySelectorAll('pre code').forEach(b => hljs.highlightElement(b));
+
+  el.querySelectorAll('blockquote').forEach(bq => {
+    const m = bq.textContent.trim().match(/^\[!(NOTE|TIP|WARNING|IMPORTANT)\]/i);
+    if (!m) return;
+    const t = m[1].toLowerCase();
+    const cls = (t === 'warning' || t === 'important') ? 'warn' : t;
+    const inner = bq.innerHTML.replace(/\[!(NOTE|TIP|WARNING|IMPORTANT)\]/i, '').trim();
+    const div = document.createElement('div');
+    div.className = `callout callout-${cls}`;
+    div.innerHTML = `<div class="callout-label">${{note:'📝 Note',tip:'💡 Tip',warn:'⚠️ Warning'}[cls]||t}</div>${inner}`;
+    bq.replaceWith(div);
+  });
+
+  wrapTaskSections(el);   // must be before addCheckboxes
+  addCheckboxes(el);
+  restoreChecks(el, currentCourse, currentExerciseIdx);
+  addCopyOnClick(el);
+  setupTaskTracking(el);
+}
+
+// ── Collapsible task sections ─────────────────────────────────────────────
+function wrapTaskSections(container) {
+  const headings = [...container.querySelectorAll('h2')];
+  if (!headings.length) return;
+
+  headings.forEach((heading, idx) => {
+    const section = document.createElement('div');
+    section.className = 'task-section';
+    section.dataset.taskIdx = idx;
+
+    const body = document.createElement('div');
+    body.className = 'task-body';
+
+    const icon = document.createElement('span');
+    icon.className = 'task-icon';
+    heading.prepend(icon);
+    heading.classList.add('task-heading');
+
+    heading.parentNode.insertBefore(section, heading);
+    section.appendChild(heading);
+    section.appendChild(body);
+
+    const nextHeading = headings[idx + 1];
+    while (section.nextSibling) {
+      const sib = section.nextSibling;
+      if (sib === nextHeading) break;
+      body.appendChild(sib);
+    }
+
+    idx === 0 ? expandSection(section, false) : collapseSection(section, false);
+    heading.addEventListener('click', () => toggleSection(section, container));
+  });
+}
+
+function expandSection(section, animate) {
+  const body = section.querySelector('.task-body');
+  const icon = section.querySelector('.task-icon');
+  section.classList.add('expanded');
+  section.classList.remove('collapsed');
+  icon.textContent = '\u25be ';
+  if (animate) {
+    body.style.maxHeight = body.scrollHeight + 'px';
+    body.addEventListener('transitionend', () => { body.style.maxHeight = 'none'; }, { once: true });
+  } else {
+    body.style.maxHeight = 'none';
+  }
+}
+
+function collapseSection(section, animate) {
+  const body = section.querySelector('.task-body');
+  const icon = section.querySelector('.task-icon');
+  if (animate) {
+    body.style.maxHeight = body.scrollHeight + 'px';
+    requestAnimationFrame(() => requestAnimationFrame(() => { body.style.maxHeight = '0'; }));
+  } else {
+    body.style.maxHeight = '0';
+  }
+  body.addEventListener('transitionend', () => {
+    section.classList.remove('expanded');
+    section.classList.add('collapsed');
+    icon.textContent = '\u25b8 ';
+  }, { once: true });
+  if (!animate) {
+    section.classList.remove('expanded');
+    section.classList.add('collapsed');
+    icon.textContent = '\u25b8 ';
+  }
+}
+
+function toggleSection(section, container) {
+  if (section.classList.contains('expanded')) {
+    collapseSection(section, true);
+  } else {
+    expandSection(section, true);
+    setTimeout(() => section.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);
+  }
+}
+
+// ── Checkbox state — persist + sync ──────────────────────────────────────
+function checksKey(course, idx) { return `lab-checks-${course}-${idx}`; }
+
+function saveChecks(container, course, stepIdx) {
+  const checks = [...container.querySelectorAll('li')].map(li => li.classList.contains('checked'));
+  localStorage.setItem(checksKey(course, stepIdx), JSON.stringify(checks));
+  broadcastChecks(checks, stepIdx);
+}
+
+function applyCheckState(container, checks) {
+  [...container.querySelectorAll('li')].forEach((li, i) => {
+    const cb = li.querySelector('.task-check');
+    if (!cb) return;
+    const on = !!checks[i];
+    cb.checked = on;
+    li.classList.toggle('checked', on);
+  });
+  container.querySelectorAll('.task-section').forEach(sec => {
+    const lis = [...sec.querySelectorAll('li')];
+    sec.querySelector('.task-heading')
+       .classList.toggle('task-complete', lis.length > 0 && lis.every(l => l.classList.contains('checked')));
+  });
+}
+
+function restoreChecks(container, course, stepIdx) {
+  const raw = localStorage.getItem(checksKey(course, stepIdx));
+  if (!raw) return;
+  try { applyCheckState(container, JSON.parse(raw)); } catch(e) {}
+}
+
+function broadcastChecks(checks, stepIdx) {
+  if (!syncChannel || suppressBroadcast) return;
+  try { syncChannel.postMessage({ type: 'checks', stepIdx, checks }); } catch(e) {}
+}
+
+// ── Checkboxes ────────────────────────────────────────────────────────────
+function addCheckboxes(container) {
+  container.querySelectorAll('li').forEach(li => {
+    if (li.querySelector('.task-check')) return;
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.className = 'task-check';
+    const txt = document.createElement('span');
+    txt.className = 'li-text';
+    while (li.firstChild) txt.appendChild(li.firstChild);
+    li.appendChild(cb);
+    if (li.parentElement && li.parentElement.tagName === 'OL') {
+      const n = document.createElement('span'); n.className = 'li-num';
+      n.textContent = `${[...li.parentElement.children].indexOf(li)+1}.`;
+      li.appendChild(n);
+    } else {
+      const b = document.createElement('span'); b.className = 'li-bullet'; b.textContent = '\u2022'; li.appendChild(b);
+    }
+    li.appendChild(txt);
+    cb.addEventListener('change', () => handleCheck(cb, li, container));
+  });
+}
+
+function handleCheck(cb, li, container) {
+  li.classList.toggle('checked', cb.checked);
+  saveChecks(container, currentCourse, currentExerciseIdx);
+  if (!cb.checked) {
+    const sec = li.closest('.task-section');
+    if (sec) sec.querySelector('.task-heading').classList.remove('task-complete');
+    return;
+  }
+  const cr = container.getBoundingClientRect();
+  const lr = li.getBoundingClientRect();
+  if ((lr.bottom - cr.top) > cr.height * 0.70) {
+    container.scrollTo({ top: container.scrollTop + (lr.top - cr.top) - 20, behavior: 'smooth' });
+  }
+  checkTaskCompletion(li, container);
+}
+
+function checkTaskCompletion(li, container) {
+  const section = li.closest('.task-section');
+  if (!section) return;
+  const allLis = [...section.querySelectorAll('li')];
+  if (!allLis.length || !allLis.every(l => l.classList.contains('checked'))) return;
+
+  section.querySelector('.task-heading').classList.add('task-complete');
+
+  setTimeout(() => {
+    collapseSection(section, true);
+    const sections = [...container.querySelectorAll('.task-section')];
+    const next = sections[sections.indexOf(section) + 1];
+    if (next) {
+      setTimeout(() => {
+        expandSection(next, true);
+        setTimeout(() => next.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);
+      }, 350);
+    }
+  }, 600);
+}
+
+// ── Section counter (within exercise) ────────────────────────────────────
+function setupTaskTracking(container) {
+  taskHeadings = [...container.querySelectorAll('.task-heading')];
+  currentTaskIdx = 0;
+  updateStepCounter();
+  if (!taskHeadings.length) return;
+  container.addEventListener('scroll', () => {
+    const top = container.getBoundingClientRect().top;
+    let idx = 0;
+    for (let i = 0; i < taskHeadings.length; i++) {
+      const sec = taskHeadings[i].closest('.task-section');
+      if (sec && sec.getBoundingClientRect().top - top <= 50) idx = i; else break;
+    }
+    if (idx !== currentTaskIdx) { currentTaskIdx = idx; updateStepCounter(); }
+  }, { passive: true });
+}
+
+function updateStepCounter() {
+  const prev = document.getElementById('btn-prev');
+  const next = document.getElementById('btn-next');
+  if (!currentMeta) { prev.disabled = true; next.disabled = true; return; }
+  prev.disabled = currentExerciseIdx === 0;
+  next.disabled = currentExerciseIdx === currentMeta.steps.length - 1;
+}
+
+// ── Copy-to-clipboard ─────────────────────────────────────────────────────
+function addCopyOnClick(container) {
+  container.querySelectorAll('code').forEach(code => {
+    if (code.closest('pre')) return;
+    code.classList.add('copyable');
+    code.title = 'Click to copy';
+    code.addEventListener('click', () => {
+      navigator.clipboard.writeText(code.textContent.trim()).then(() => {
+        code.classList.add('copied');
+        setTimeout(() => code.classList.remove('copied'), 1200);
+      }).catch(() => {
+        const r = document.createRange(); r.selectNodeContents(code);
+        const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      });
+    });
+  });
+}
+
+// ── Navigation ────────────────────────────────────────────────────────────
+document.getElementById('exercise-select').addEventListener('change', e => {
+  renderStep(parseInt(e.target.value, 10));
+});
+
+document.getElementById('btn-prev').addEventListener('click', () => {
+  if (currentExerciseIdx > 0) renderStep(currentExerciseIdx - 1);
+});
+
+document.getElementById('btn-next').addEventListener('click', () => {
+  if (currentMeta && currentExerciseIdx < currentMeta.steps.length - 1) renderStep(currentExerciseIdx + 1);
+});
+
+// ── Refresh: re-fetch the current step from server (instructor edited it) ──
+document.getElementById('btn-refresh').addEventListener('click', async (e) => {
+  if (currentExerciseIdx == null || !currentMeta) return;
+  const btn = e.currentTarget;
+  const orig = btn.innerHTML;
+  btn.disabled = true; btn.innerHTML = '⧗'; // spinner-ish glyph
+  try {
+    await renderStep(currentExerciseIdx);
+  } finally {
+    btn.disabled = false; btn.innerHTML = orig;
+  }
+});
+
+// ── Download current step as .md ─────────────────────────────────────────
+document.getElementById('btn-download').addEventListener('click', async () => {
+  if (!currentMeta) return;
+  const step = currentMeta.steps[currentExerciseIdx];
+  if (!step) return;
+  try {
+    const r = await fetch(`/api/courses/${currentCourse}/step/${currentExerciseIdx}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const md = await r.text();
+    const rawName = step.file || `${currentCourse}-step-${currentExerciseIdx + 1}.md`;
+    const safe = rawName.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const finalName = safe.toLowerCase().endsWith('.md') ? safe : `${safe}.md`;
+    const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = finalName;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+  } catch (e) {
+    console.error('Download failed:', e);
+  }
+});
+
+// ── Pop-out tutorial to second-screen tab + sync ─────────────────────────
+let syncChannel = null;
+let suppressBroadcast = false;
+
+function syncKey() {
+  return (autoUser && autoCourse) ? `lab-sync-${autoUser}-${autoCourse}` : null;
+}
+
+function openSyncChannel() {
+  const key = syncKey();
+  if (!key || syncChannel || typeof BroadcastChannel === 'undefined') return;
+  try {
+    syncChannel = new BroadcastChannel(key);
+    syncChannel.addEventListener('message', (ev) => {
+      const msg = ev.data;
+      if (!msg || typeof msg !== 'object') return;
+      if (msg.type === 'step' && typeof msg.index === 'number' && msg.index !== currentExerciseIdx) {
+        suppressBroadcast = true;
+        renderStep(msg.index).finally(() => { suppressBroadcast = false; });
+      }
+      if (msg.type === 'checks' && typeof msg.stepIdx === 'number' && msg.stepIdx === currentExerciseIdx) {
+        suppressBroadcast = true;
+        applyCheckState(document.getElementById('tutorial-content'), msg.checks);
+        suppressBroadcast = false;
+      }
+    });
+  } catch (e) { console.warn('BroadcastChannel failed:', e); }
+}
+
+function broadcastStep(idx) {
+  if (!syncChannel || suppressBroadcast) return;
+  try { syncChannel.postMessage({ type: 'step', index: idx }); } catch (e) {}
+}
+
+document.getElementById('btn-popout').addEventListener('click', () => {
+  if (!autoCourse || !autoUser) {
+    console.warn('Pop-out requires both user and course in the URL');
+    return;
+  }
+  const url = `/tutorial.html?course=${encodeURIComponent(autoCourse)}&user=${encodeURIComponent(autoUser)}&step=${currentExerciseIdx}`;
+  window.open(url, '_blank', 'noopener');
+  // Auto-hide the docked panel after popping out (only if currently visible)
+  if (!panelHidden) btnToggle.click();
+});
+
+loadCourse();
+
+// ── Feedback modal ────────────────────────────────────────────────────────
+(function initFeedback() {
+  const btn = document.getElementById('btn-feedback');
+  if (!btn) return;
+
+  let modalEl = null;
+
+  function ensureModal() {
+    if (modalEl) return modalEl;
+    modalEl = document.createElement('div');
+    modalEl.className = 'fb-modal-bg hidden';
+    modalEl.innerHTML = `
+      <div class="fb-modal" role="dialog" aria-labelledby="fb-modal-title">
+        <h3 id="fb-modal-title">Suggest a change to this lab</h3>
+        <div class="fb-field"><label>Course</label><div id="fb-course" class="fb-readonly"></div></div>
+        <div class="fb-field"><label>Lab</label><div id="fb-lab" class="fb-readonly"></div></div>
+        <div class="fb-field"><label>Step</label>
+          <select id="fb-step"></select>
+        </div>
+        <div class="fb-field"><label>Task</label>
+          <select id="fb-task"></select>
+        </div>
+        <div class="fb-field"><label>Paste incorrect text:</label>
+          <textarea id="fb-incorrect" rows="2" placeholder="(optional) the exact line, command, or phrase you think is wrong"></textarea>
+        </div>
+        <div class="fb-field"><label>Your suggestion <span class="fb-req">*</span></label>
+          <textarea id="fb-comment" rows="4" placeholder="What should it say instead? Why?"></textarea>
+        </div>
+        <div class="fb-foot">
+          <button type="button" class="btn" data-fb-close>Cancel</button>
+          <button type="button" class="btn btn-accent" id="fb-submit">Submit</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modalEl);
+    modalEl.addEventListener('click', e => { if (e.target === modalEl) close(); });
+    modalEl.querySelectorAll('[data-fb-close]').forEach(b => b.addEventListener('click', close));
+    modalEl.querySelector('#fb-step').addEventListener('change', onStepChange);
+    modalEl.querySelector('#fb-submit').addEventListener('click', submit);
+    return modalEl;
+  }
+
+  function open()  { ensureModal().classList.remove('hidden'); }
+  function close() { if (modalEl) modalEl.classList.add('hidden'); }
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && modalEl && !modalEl.classList.contains('hidden')) close(); });
+
+  // Parse "## " section headings. Returns [{heading, body}, ...].
+  // Code fences are respected so we don't mistake `##` inside a code block for a heading.
+  function parseLabSections(md) {
+    const out = [];
+    if (!md) return out;
+    const lines = md.split('\n');
+    let inFence = false, cur = null;
+    const flush = () => { if (cur) out.push(cur); };
+    for (const line of lines) {
+      if (/^```/.test(line)) inFence = !inFence;
+      if (!inFence && /^## +/.test(line)) {
+        flush();
+        cur = { heading: line.replace(/^## +/, '').trim(), body: '' };
+      } else if (cur) {
+        cur.body += (cur.body ? '\n' : '') + line;
+      }
+    }
+    flush();
+    return out;
+  }
+
+  // Top-level numbered items (code-fence aware).
+  function parseTaskNumbers(body) {
+    const out = [];
+    if (!body) return out;
+    let inFence = false;
+    for (const line of body.split('\n')) {
+      if (/^```/.test(line)) { inFence = !inFence; continue; }
+      if (inFence) continue;
+      const m = line.match(/^(\d+)\.\s+(.+)$/);
+      if (m) out.push({ num: m[1], snippet: m[2].slice(0, 80) });
+    }
+    return out;
+  }
+
+  let loadedSections = [];
+
+  function populateSteps() {
+    const sel = modalEl.querySelector('#fb-step');
+    const nonStep = new Set(['business example', 'connection details', 'result', 'results']);
+    const opts = ['<option value="_all">(whole lab)</option>'];
+    loadedSections.forEach((s, i) => {
+      if (nonStep.has(s.heading.toLowerCase())) return;
+      const lbl = s.heading.replace(/"/g, '&quot;');
+      opts.push(`<option value="${i}">${lbl}</option>`);
+    });
+    sel.innerHTML = opts.join('');
+    onStepChange();
+  }
+
+  function onStepChange() {
+    const stepVal = modalEl.querySelector('#fb-step').value;
+    const taskSel = modalEl.querySelector('#fb-task');
+    const tasks = [];
+    if (stepVal !== '_all' && loadedSections[Number(stepVal)]) {
+      tasks.push(...parseTaskNumbers(loadedSections[Number(stepVal)].body));
+    }
+    const parts = ['<option value="_whole">(whole section)</option>'];
+    tasks.forEach(t => parts.push(`<option value="${t.num}">${t.num}. ${t.snippet.replace(/"/g, '&quot;')}</option>`));
+    taskSel.innerHTML = parts.join('');
+  }
+
+  async function submit() {
+    const btnSub = modalEl.querySelector('#fb-submit');
+    const comment = modalEl.querySelector('#fb-comment').value.trim();
+    if (comment.length < 3) { alert('Please describe your suggestion (at least 3 chars).'); return; }
+    const stepVal = modalEl.querySelector('#fb-step').value;
+    const section = stepVal === '_all' ? '(whole lab)' : loadedSections[Number(stepVal)].heading;
+    const taskNum = modalEl.querySelector('#fb-task').value;
+    const incorrect = modalEl.querySelector('#fb-incorrect').value.trim();
+    btnSub.disabled = true;
+    btnSub.textContent = 'Sending…';
+    try {
+      const res = await fetch('/api/feedback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          course: currentCourse,
+          stepIndex: currentExerciseIdx,
+          section,
+          taskNum: taskNum === '_whole' ? null : taskNum,
+          incorrectText: incorrect || null,
+          user: autoUser || 'anonymous',
+          comment,
+        }),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        throw new Error(j.error || `HTTP ${res.status}`);
+      }
+      close();
+      modalEl.querySelector('#fb-comment').value = '';
+      modalEl.querySelector('#fb-incorrect').value = '';
+      showFbToast('Thanks — your feedback was sent.');
+    } catch (e) {
+      alert('Could not send: ' + e.message);
+    } finally {
+      btnSub.disabled = false;
+      btnSub.textContent = 'Submit';
+    }
+  }
+
+  function showFbToast(msg) {
+    let t = document.getElementById('fb-toast');
+    if (!t) {
+      t = document.createElement('div');
+      t.id = 'fb-toast';
+      t.className = 'fb-toast';
+      document.body.appendChild(t);
+    }
+    t.textContent = msg;
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 2200);
+  }
+
+  btn.addEventListener('click', async () => {
+    if (!currentCourse || !currentMeta) { alert('Load a lab first.'); return; }
+    ensureModal();
+    modalEl.querySelector('#fb-course').textContent = currentCourse;
+    modalEl.querySelector('#fb-lab').textContent = currentMeta.steps[currentExerciseIdx]?.title || `Lab ${currentExerciseIdx + 1}`;
+    loadedSections = [];
+    modalEl.querySelector('#fb-step').innerHTML = '<option>Loading…</option>';
+    modalEl.querySelector('#fb-task').innerHTML = '';
+    open();
+    try {
+      const r = await fetch(`/api/courses/${currentCourse}/step/${currentExerciseIdx}`);
+      const md = await r.text();
+      loadedSections = parseLabSections(md);
+      populateSteps();
+    } catch (e) {
+      modalEl.querySelector('#fb-step').innerHTML = '<option value="_all">(whole lab)</option>';
+    }
+  });
+})();

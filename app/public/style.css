@@ -1,0 +1,205 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #111317;
+  --surface: #1a1d23;
+  --border: #2a2d35;
+  --accent: #00d4aa;
+  --accent2: #5794f2;
+  --text: #d4d9e0;
+  --text-muted: #6b7280;
+  --topbar-h: 52px;
+}
+
+body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; height: 100vh; overflow: hidden; }
+
+/* ── Topbar ── */
+.topbar {
+  height: var(--topbar-h); background: var(--surface); border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between; padding: 0 16px; gap: 12px;
+}
+.topbar-left, .topbar-right { display: flex; align-items: center; gap: 10px; }
+.logo { font-weight: 700; font-size: 1rem; color: var(--accent); white-space: nowrap; }
+
+.exercise-select {
+  background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  padding: 5px 10px; border-radius: 6px; font-size: 0.875rem; cursor: pointer; min-width: 200px;
+}
+.exercise-select:focus { outline: none; border-color: var(--accent); }
+.step-counter { font-size: 0.8rem; color: var(--text-muted); white-space: nowrap; }
+.btn {
+  background: var(--surface); color: var(--text); border: 1px solid var(--border);
+  padding: 5px 14px; border-radius: 6px; cursor: pointer; font-size: 0.85rem; transition: all .15s;
+}
+.btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.btn-icon { padding: 5px 11px; font-size: 1.05rem; }
+
+/* ── Split layout ── */
+.split {
+  display: grid;
+  grid-template-columns: 65% 1fr;
+  height: calc(100vh - var(--topbar-h));
+  overflow: hidden;
+}
+.split.panel-hidden { /* managed by JS */ }
+.split.panel-hidden .pane-right,
+.split.panel-hidden .resize-handle { display: none; }
+
+/* ── Panes ── */
+.pane-left { background: #000; overflow: hidden; }
+.pane-left iframe { width: 100%; height: 100%; border: none; display: block; }
+.pane-right { display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
+
+.tutorial-title {
+  padding: 11px 16px 9px; font-size: 0.81em; font-weight: 600; color: var(--accent2);
+  border-bottom: 1px solid var(--border); background: var(--surface);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-shrink: 0;
+}
+.tutorial-content {
+  flex: 1; overflow-y: auto; overflow-x: hidden;
+  padding: 16px 18px; font-size: 0.88em; line-height: 1.65;
+}
+.placeholder { color: var(--text-muted); margin-top: 40px; text-align: center; }
+
+/* ── Markdown: headings ── */
+.tutorial-content h1 { font-size: 1.364em; color: var(--accent); margin: 0 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+.tutorial-content h2 { font-size: 1.102em; color: var(--accent2); margin: 18px 0 8px; padding: 6px 10px; border-left: 3px solid var(--accent2); background: rgba(87,148,242,.07); border-radius: 0 4px 4px 0; }
+.tutorial-content h3 { font-size: 1.034em; color: var(--text); margin: 14px 0 5px; }
+.tutorial-content h4 { font-size: 0.989em; color: var(--text-muted); margin: 10px 0 4px; }
+.tutorial-content p { margin-bottom: 10px; }
+.tutorial-content hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
+
+/* ── Lists with checkboxes ── */
+.tutorial-content ul, .tutorial-content ol { padding-left: 0; margin: 0 0 10px 0; list-style: none; }
+.tutorial-content li { display: flex; align-items: flex-start; gap: 7px; padding: 3px 0; }
+.tutorial-content li.checked { opacity: 0.6; }
+.tutorial-content li.checked .li-text { text-decoration: line-through; color: var(--text-muted); }
+.li-num  { color: var(--accent2); font-weight: 700; font-size: 0.82em; min-width: 18px; flex-shrink: 0; margin-top: 2px; text-align: right; }
+.li-bullet { color: var(--accent2); flex-shrink: 0; line-height: 1.65; }
+.li-text { flex: 1; min-width: 0; }
+
+/* ── Checkbox ── */
+.task-check {
+  appearance: none; -webkit-appearance: none;
+  width: 15px; height: 15px; min-width: 15px;
+  border: 1.5px solid var(--border); border-radius: 3px;
+  cursor: pointer; margin-top: 3px; flex-shrink: 0;
+  background: transparent; transition: all 0.15s; position: relative;
+}
+.task-check:hover { border-color: var(--accent); }
+.task-check:checked { background: var(--accent); border-color: var(--accent); }
+.task-check:checked::after {
+  content: ''; position: absolute;
+  left: 4px; top: 1px; width: 4px; height: 8px;
+  border: 2px solid #071410; border-top: none; border-left: none;
+  transform: rotate(45deg);
+}
+
+/* ── Inline code — copyable ── */
+.tutorial-content code {
+  background: var(--surface); border: 1px solid var(--border);
+  padding: 1px 6px; border-radius: 4px;
+  font-family: 'Consolas', 'Cascadia Code', monospace; font-size: 0.82em; color: #e06c75;
+}
+.tutorial-content code.copyable { cursor: pointer; transition: background 0.12s, color 0.12s; user-select: none; }
+.tutorial-content code.copyable::after { content: ' 📋'; font-size: 0.72em; opacity: 0; transition: opacity 0.1s; }
+.tutorial-content code.copyable:hover::after { opacity: 0.6; }
+.tutorial-content code.copyable:hover { background: #2a1520; border-color: #c05060; }
+.tutorial-content code.copyable.copied { background: var(--accent) !important; color: #071410 !important; border-color: var(--accent) !important; }
+.tutorial-content code.copyable.copied::after { content: ' ✓'; opacity: 1 !important; }
+
+/* ── Code blocks ── */
+.tutorial-content pre { background: #0d1117; border: 1px solid var(--border); border-radius: 6px; padding: 12px; overflow-x: auto; margin-bottom: 12px; }
+.tutorial-content pre code { background: none; border: none; padding: 0; color: inherit; font-size: 0.932em; cursor: default; }
+.tutorial-content pre code::after { display: none; }
+
+/* ── Tables ── */
+.tutorial-content table { border-collapse: collapse; width: 100%; margin-bottom: 12px; font-size: 0.943em; }
+.tutorial-content th { background: var(--surface); padding: 6px 10px; text-align: left; border: 1px solid var(--border); color: var(--accent2); }
+.tutorial-content td { padding: 5px 10px; border: 1px solid var(--border); }
+.tutorial-content strong { color: #f0f0f0; }
+
+/* ── Callouts ── */
+.callout { border-radius: 6px; padding: 10px 14px; margin-bottom: 12px; font-size: 0.966em; }
+.callout-note { background: #1a2744; border-left: 3px solid var(--accent2); }
+.callout-tip  { background: #1a2f2a; border-left: 3px solid var(--accent); }
+.callout-warn { background: #2f2010; border-left: 3px solid #e5a000; }
+.callout-label { font-weight: 700; margin-bottom: 4px; font-size: 0.941em; text-transform: uppercase; letter-spacing: .05em; }
+.callout-note .callout-label { color: var(--accent2); }
+.callout-tip  .callout-label { color: var(--accent); }
+.callout-warn .callout-label { color: #e5a000; }
+.tutorial-content blockquote { border-left: 3px solid var(--text-muted); margin: 8px 0; padding: 6px 12px; background: var(--surface); border-radius: 0 4px 4px 0; color: var(--text-muted); }
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #3a3d45; }
+
+/* ── Collapsible Task Sections ── */
+.task-section { margin-bottom: 6px; }
+.task-body { overflow: hidden; transition: max-height 0.35s ease; }
+.task-heading { cursor: pointer; user-select: none; display: flex; align-items: center; gap: 6px; }
+.task-heading:hover { opacity: 0.85; }
+.task-icon { font-size: 0.75em; flex-shrink: 0; transition: transform 0.2s; }
+.task-heading.task-complete { color: var(--accent) !important; border-left-color: var(--accent) !important; background: rgba(0,212,170,.12) !important; }
+.course-title { color: var(--text-muted); font-size: 0.85rem; margin-left: 4px; }
+
+/* ── Standalone tutorial page (/tutorial.html) ────────────────────────── */
+.tutorial-full {
+  height: calc(100vh - var(--topbar-h));
+  display: flex;
+  overflow: hidden;
+}
+.tutorial-full .pane-right {
+  flex: 1;
+  min-width: 0;
+  max-width: 100%;
+}
+.tutorial-standalone .tutorial-content { padding: 18px 28px; max-width: 1100px; margin: 0 auto; width: 100%; }
+
+/* ── Feedback modal (student side) ────────────────────────────────────── */
+.fb-modal-bg {
+  position: fixed; inset: 0; background: rgba(0,0,0,.6);
+  display: flex; align-items: center; justify-content: center; z-index: 200;
+}
+.fb-modal-bg.hidden { display: none; }
+.fb-modal {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 22px; width: 520px; max-width: 95vw; max-height: 90vh; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 12px;
+  color: var(--text); font-family: inherit;
+}
+.fb-modal h3 { font-size: 1rem; color: var(--text); margin: 0; }
+.fb-field { display: flex; flex-direction: column; gap: 5px; }
+.fb-field label {
+  font-size: 0.7rem; color: var(--text-muted); font-weight: 600;
+  text-transform: uppercase; letter-spacing: .05em;
+}
+.fb-req { color: var(--accent); }
+.fb-readonly {
+  background: rgba(255,255,255,.03); border: 1px solid var(--border); border-radius: 6px;
+  padding: 6px 10px; font-size: 0.85rem; color: var(--text-muted);
+}
+.fb-modal select, .fb-modal textarea {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text); padding: 7px 10px; font-size: 0.85rem; font-family: inherit;
+  width: 100%;
+}
+.fb-modal textarea { resize: vertical; min-height: 60px; }
+.fb-modal select:focus, .fb-modal textarea:focus { outline: none; border-color: var(--accent); }
+.fb-foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+.fb-modal .btn-accent {
+  background: var(--accent); color: #000; border-color: var(--accent); font-weight: 600;
+}
+.fb-modal .btn-accent:hover { background: #00bfa0; border-color: #00bfa0; }
+.fb-modal .btn-accent:disabled { opacity: .6; cursor: default; }
+
+.fb-toast {
+  position: fixed; bottom: 20px; right: 20px; background: var(--surface);
+  border: 1px solid var(--accent); border-radius: 6px; padding: 10px 16px;
+  color: var(--accent); font-size: 0.85rem; z-index: 300;
+  opacity: 0; transition: opacity .2s; pointer-events: none;
+}
+.fb-toast.show { opacity: 1; }

@@ -1,0 +1,42 @@
+{
+  "title": "ADM103: System Administration II",
+  "description": "System Administration II of SAP S/4HANA and SAP Business Suite",
+  "steps": [
+    {
+      "title": "ADM103-Exercise-14-WebDispatcher",
+      "file": "ADM103-Exercise-14-WebDispatcher.md"
+    },
+    {
+      "title": "ADM103-Exercise-15-WD-AdminUI",
+      "file": "ADM103-Exercise-15-WD-AdminUI.md"
+    },
+    {
+      "title": "ADM103-Exercise-16-HTTPS-Browser-WD",
+      "file": "ADM103-Exercise-16-HTTPS-Browser-WD.md"
+    },
+    {
+      "title": "ADM103-Exercise-17-HTTPS-WD-SAP",
+      "file": "ADM103-Exercise-17-HTTPS-WD-SAP.md"
+    },
+    {
+      "title": "ADM103-Exercise-18-Use-WebDispatcher",
+      "file": "ADM103-Exercise-18-Use-WebDispatcher.md"
+    },
+    {
+      "title": "ADM103-Exercise-19-SMTP-Email",
+      "file": "ADM103-Exercise-19-SMTP-Email.md"
+    },
+    {
+      "title": "ADM103-Exercise-20-Enqueue-Replication-Server",
+      "file": "ADM103-Exercise-20-Enqueue-Replication-Server.md"
+    },
+    {
+      "title": "ADM103-Exercise-21-CUA-Setup",
+      "file": "ADM103-Exercise-21-CUA-Setup.md"
+    },
+    {
+      "title": "ADM103-Exercise-22-CUA-Initial-Sync",
+      "file": "ADM103-Exercise-22-CUA-Initial-Sync.md"
+    }
+  ]
+}

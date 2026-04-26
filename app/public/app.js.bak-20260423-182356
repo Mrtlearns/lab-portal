@@ -1,0 +1,396 @@
+const GUAC_URL = 'https://lab.training.playsap.us/guacamole/';
+
+let currentCourse = null, currentMeta = null;
+let currentExerciseIdx = 0, currentTaskIdx = 0;
+let taskHeadings = [];
+
+const params     = new URLSearchParams(location.search);
+const autoUser   = params.get('user');
+const autoCourse = params.get('course') || params.get('lab'); // 'lab' kept for backwards compat
+
+const frame = document.getElementById('guac-frame');
+
+// ── Keyboard focus management ─────────────────────────────────────────────
+let _guacListenersReady = false;
+
+function focusGuacSink() {
+  try {
+    const cw  = frame.contentWindow;
+    const doc = cw && cw.document;
+    if (!doc) return;
+    // Promote the iframe's browsing context before focusing the element —
+    // Chrome ignores t.focus() from parent-realm code when the iframe is
+    // not the active browsing context.
+    cw.focus();
+    for (const t of doc.querySelectorAll('textarea')) {
+      if (t.style.position === 'fixed') { t.focus(); return; }
+    }
+  } catch(e) {}
+}
+
+function setupGuacListeners() {
+  if (_guacListenersReady) { focusGuacSink(); return; }
+  try {
+    const cw  = frame.contentWindow;
+    const doc = cw && cw.document;
+    if (!doc) return;
+    let sink = null;
+    for (const t of doc.querySelectorAll('textarea')) {
+      if (t.style.position === 'fixed') { sink = t; break; }
+    }
+    if (!sink) return; // not ready yet — poller will retry
+
+    _guacListenersReady = true;
+    cw.focus();
+    sink.focus();
+
+    // Inject a recovery script that runs within the iframe's own JS realm.
+    // focus() calls from the parent realm are blocked by Chrome when the
+    // iframe is not the active browsing context; calling from inside the
+    // iframe's own realm bypasses that restriction entirely.
+    const s = doc.createElement('script');
+    s.textContent = `(function(){
+      document.addEventListener('mousedown', function _guacRefocus(){
+        var ts = document.querySelectorAll('textarea');
+        for(var i=0;i<ts.length;i++){
+          if(ts[i].style.position==='fixed'){ ts[i].focus(); return; }
+        }
+      }, true);
+    })();`;
+    (doc.head || doc.documentElement).appendChild(s);
+
+  } catch(e) {}
+}
+
+frame.addEventListener('load', () => {
+  _guacListenersReady = false;
+  // Poll every 500 ms until Guacamole's InputSink textarea appears.
+  // Guacamole initialises and auto-logs-in asynchronously, so the sink
+  // may not exist at a fixed delay after the load event.
+  let _attempts = 0;
+  const _poller = setInterval(() => {
+    _attempts++;
+    setupGuacListeners();
+    if (_guacListenersReady || _attempts >= 40) clearInterval(_poller);
+  }, 500);
+});
+
+if (autoUser) {
+  const pwd = params.get('pass') || '123456';
+  frame.src = `${GUAC_URL}#?username=${encodeURIComponent(autoUser)}&password=${encodeURIComponent(pwd)}`;
+} else {
+  frame.src = GUAC_URL;
+}
+
+marked.setOptions({ breaks: true, gfm: true });
+
+// ── Panel width controls ──────────────────────────────────────────────────
+const split     = document.getElementById('split');
+const btnToggle = document.getElementById('btn-toggle-panel');
+
+function setCols(pct) {
+  const clamped = Math.max(15, Math.min(85, pct));
+  split.style.gridTemplateColumns = clamped + '% 1fr';
+  localStorage.setItem('panel-split', clamped.toFixed(1));
+  return clamped;
+}
+let currentPct = parseFloat(localStorage.getItem('panel-split') || '65');
+setCols(currentPct);
+
+document.getElementById('btn-panel-wider').addEventListener('click', () => { currentPct = setCols(currentPct - 5); });
+document.getElementById('btn-panel-narrower').addEventListener('click', () => { currentPct = setCols(currentPct + 5); });
+
+// ── Panel toggle ──────────────────────────────────────────────────────────
+let panelHidden = false;
+btnToggle.addEventListener('click', () => {
+  panelHidden = !panelHidden;
+  if (panelHidden) {
+    split.style.gridTemplateColumns = '1fr 0';
+    document.getElementById('pane-right').style.display = 'none';
+  } else {
+    setCols(currentPct);
+    document.getElementById('pane-right').style.display = '';
+  }
+  btnToggle.innerHTML = panelHidden ? '&#x21A4;' : '&#x21A6;';
+  btnToggle.title = panelHidden ? 'Show tutorial panel' : 'Hide tutorial panel';
+});
+
+// ── Course loading ────────────────────────────────────────────────────────
+async function loadCourse() {
+  try {
+    if (autoCourse) {
+      await selectCourse(autoCourse);
+    } else {
+      document.getElementById('tutorial-content').innerHTML =
+        '<div class="placeholder">No course specified in URL.<br>Add <code>?course=ADM103</code> to load a course.</div>';
+      document.getElementById('exercise-select').innerHTML = '<option value="">— No course —</option>';
+    }
+  } catch(e) {
+    console.error(e);
+    document.getElementById('tutorial-content').innerHTML =
+      `<div class="placeholder">Failed to load course: ${e.message}</div>`;
+  }
+}
+
+async function selectCourse(course) {
+  currentCourse = course; currentExerciseIdx = 0;
+  currentMeta = await fetch(`/api/courses/${course}/meta`).then(r => r.json());
+  const titleEl = document.getElementById('course-title');
+  if (titleEl) titleEl.textContent = currentMeta.title;
+  populateExerciseSelect();
+  await renderStep(0);
+}
+
+function populateExerciseSelect() {
+  const sel = document.getElementById('exercise-select');
+  sel.innerHTML = '';
+  (currentMeta.steps || []).forEach((step, i) => {
+    const o = document.createElement('option');
+    o.value = i;
+    o.textContent = step.title;
+    sel.appendChild(o);
+  });
+  sel.disabled = false;
+  sel.value = 0;
+}
+
+async function renderStep(idx) {
+  if (!currentMeta) return;
+  currentExerciseIdx = idx;
+  const step = currentMeta.steps[idx];
+  if (!step) return;
+
+  // Sync dropdown
+  const sel = document.getElementById('exercise-select');
+  if (sel) sel.value = idx;
+
+  document.getElementById('tutorial-title').textContent = `${currentMeta.title} — ${step.title}`;
+  const content = document.getElementById('tutorial-content');
+  content.innerHTML = '<div class="placeholder">Loading\u2026</div>';
+  taskHeadings = []; currentTaskIdx = 0;
+  try {
+    const md = await fetch(`/api/courses/${currentCourse}/step/${idx}`).then(r => r.text());
+    content.innerHTML = marked.parse(md);
+    postRender(content);
+    content.scrollTop = 0;
+  } catch(e) {
+    content.innerHTML = `<div class="placeholder">Error: ${e.message}</div>`;
+  }
+  updateStepCounter();
+}
+
+// ── Post-render ───────────────────────────────────────────────────────────
+function postRender(el) {
+  el.querySelectorAll('pre code').forEach(b => hljs.highlightElement(b));
+
+  el.querySelectorAll('blockquote').forEach(bq => {
+    const m = bq.textContent.trim().match(/^\[!(NOTE|TIP|WARNING|IMPORTANT)\]/i);
+    if (!m) return;
+    const t = m[1].toLowerCase();
+    const cls = (t === 'warning' || t === 'important') ? 'warn' : t;
+    const inner = bq.innerHTML.replace(/\[!(NOTE|TIP|WARNING|IMPORTANT)\]/i, '').trim();
+    const div = document.createElement('div');
+    div.className = `callout callout-${cls}`;
+    div.innerHTML = `<div class="callout-label">${{note:'📝 Note',tip:'💡 Tip',warn:'⚠️ Warning'}[cls]||t}</div>${inner}`;
+    bq.replaceWith(div);
+  });
+
+  wrapTaskSections(el);   // must be before addCheckboxes
+  addCheckboxes(el);
+  addCopyOnClick(el);
+  setupTaskTracking(el);
+}
+
+// ── Collapsible task sections ─────────────────────────────────────────────
+function wrapTaskSections(container) {
+  const headings = [...container.querySelectorAll('h2')];
+  if (!headings.length) return;
+
+  headings.forEach((heading, idx) => {
+    const section = document.createElement('div');
+    section.className = 'task-section';
+    section.dataset.taskIdx = idx;
+
+    const body = document.createElement('div');
+    body.className = 'task-body';
+
+    const icon = document.createElement('span');
+    icon.className = 'task-icon';
+    heading.prepend(icon);
+    heading.classList.add('task-heading');
+
+    heading.parentNode.insertBefore(section, heading);
+    section.appendChild(heading);
+    section.appendChild(body);
+
+    const nextHeading = headings[idx + 1];
+    while (section.nextSibling) {
+      const sib = section.nextSibling;
+      if (sib === nextHeading) break;
+      body.appendChild(sib);
+    }
+
+    idx === 0 ? expandSection(section, false) : collapseSection(section, false);
+    heading.addEventListener('click', () => toggleSection(section, container));
+  });
+}
+
+function expandSection(section, animate) {
+  const body = section.querySelector('.task-body');
+  const icon = section.querySelector('.task-icon');
+  section.classList.add('expanded');
+  section.classList.remove('collapsed');
+  icon.textContent = '\u25be ';
+  if (animate) {
+    body.style.maxHeight = body.scrollHeight + 'px';
+    body.addEventListener('transitionend', () => { body.style.maxHeight = 'none'; }, { once: true });
+  } else {
+    body.style.maxHeight = 'none';
+  }
+}
+
+function collapseSection(section, animate) {
+  const body = section.querySelector('.task-body');
+  const icon = section.querySelector('.task-icon');
+  if (animate) {
+    body.style.maxHeight = body.scrollHeight + 'px';
+    requestAnimationFrame(() => requestAnimationFrame(() => { body.style.maxHeight = '0'; }));
+  } else {
+    body.style.maxHeight = '0';
+  }
+  body.addEventListener('transitionend', () => {
+    section.classList.remove('expanded');
+    section.classList.add('collapsed');
+    icon.textContent = '\u25b8 ';
+  }, { once: true });
+  if (!animate) {
+    section.classList.remove('expanded');
+    section.classList.add('collapsed');
+    icon.textContent = '\u25b8 ';
+  }
+}
+
+function toggleSection(section, container) {
+  if (section.classList.contains('expanded')) {
+    collapseSection(section, true);
+  } else {
+    expandSection(section, true);
+    setTimeout(() => section.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);
+  }
+}
+
+// ── Checkboxes ────────────────────────────────────────────────────────────
+function addCheckboxes(container) {
+  container.querySelectorAll('li').forEach(li => {
+    if (li.querySelector('.task-check')) return;
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.className = 'task-check';
+    const txt = document.createElement('span');
+    txt.className = 'li-text';
+    while (li.firstChild) txt.appendChild(li.firstChild);
+    li.appendChild(cb);
+    if (li.parentElement && li.parentElement.tagName === 'OL') {
+      const n = document.createElement('span'); n.className = 'li-num';
+      n.textContent = `${[...li.parentElement.children].indexOf(li)+1}.`;
+      li.appendChild(n);
+    } else {
+      const b = document.createElement('span'); b.className = 'li-bullet'; b.textContent = '\u2022'; li.appendChild(b);
+    }
+    li.appendChild(txt);
+    cb.addEventListener('change', () => handleCheck(cb, li, container));
+  });
+}
+
+function handleCheck(cb, li, container) {
+  li.classList.toggle('checked', cb.checked);
+  if (!cb.checked) {
+    const sec = li.closest('.task-section');
+    if (sec) sec.querySelector('.task-heading').classList.remove('task-complete');
+    return;
+  }
+  const cr = container.getBoundingClientRect();
+  const lr = li.getBoundingClientRect();
+  if ((lr.bottom - cr.top) > cr.height * 0.70) {
+    container.scrollTo({ top: container.scrollTop + (lr.top - cr.top) - 20, behavior: 'smooth' });
+  }
+  checkTaskCompletion(li, container);
+}
+
+function checkTaskCompletion(li, container) {
+  const section = li.closest('.task-section');
+  if (!section) return;
+  const allLis = [...section.querySelectorAll('li')];
+  if (!allLis.length || !allLis.every(l => l.classList.contains('checked'))) return;
+
+  section.querySelector('.task-heading').classList.add('task-complete');
+
+  setTimeout(() => {
+    collapseSection(section, true);
+    const sections = [...container.querySelectorAll('.task-section')];
+    const next = sections[sections.indexOf(section) + 1];
+    if (next) {
+      setTimeout(() => {
+        expandSection(next, true);
+        setTimeout(() => next.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);
+      }, 350);
+    }
+  }, 600);
+}
+
+// ── Section counter (within exercise) ────────────────────────────────────
+function setupTaskTracking(container) {
+  taskHeadings = [...container.querySelectorAll('.task-heading')];
+  currentTaskIdx = 0;
+  updateStepCounter();
+  if (!taskHeadings.length) return;
+  container.addEventListener('scroll', () => {
+    const top = container.getBoundingClientRect().top;
+    let idx = 0;
+    for (let i = 0; i < taskHeadings.length; i++) {
+      const sec = taskHeadings[i].closest('.task-section');
+      if (sec && sec.getBoundingClientRect().top - top <= 50) idx = i; else break;
+    }
+    if (idx !== currentTaskIdx) { currentTaskIdx = idx; updateStepCounter(); }
+  }, { passive: true });
+}
+
+function updateStepCounter() {
+  const prev = document.getElementById('btn-prev');
+  const next = document.getElementById('btn-next');
+  if (!currentMeta) { prev.disabled = true; next.disabled = true; return; }
+  prev.disabled = currentExerciseIdx === 0;
+  next.disabled = currentExerciseIdx === currentMeta.steps.length - 1;
+}
+
+// ── Copy-to-clipboard ─────────────────────────────────────────────────────
+function addCopyOnClick(container) {
+  container.querySelectorAll('code').forEach(code => {
+    if (code.closest('pre')) return;
+    code.classList.add('copyable');
+    code.title = 'Click to copy';
+    code.addEventListener('click', () => {
+      navigator.clipboard.writeText(code.textContent.trim()).then(() => {
+        code.classList.add('copied');
+        setTimeout(() => code.classList.remove('copied'), 1200);
+      }).catch(() => {
+        const r = document.createRange(); r.selectNodeContents(code);
+        const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      });
+    });
+  });
+}
+
+// ── Navigation ────────────────────────────────────────────────────────────
+document.getElementById('exercise-select').addEventListener('change', e => {
+  renderStep(parseInt(e.target.value, 10));
+});
+
+document.getElementById('btn-prev').addEventListener('click', () => {
+  if (currentExerciseIdx > 0) renderStep(currentExerciseIdx - 1);
+});
+
+document.getElementById('btn-next').addEventListener('click', () => {
+  if (currentMeta && currentExerciseIdx < currentMeta.steps.length - 1) renderStep(currentExerciseIdx + 1);
+});
+
+loadCourse();

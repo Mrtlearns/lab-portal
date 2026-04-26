@@ -1,0 +1,19 @@
+services:
+  lab-portal:
+    image: node:20-alpine
+    working_dir: /app
+    command: sh -c "npm install && node server.js"
+    volumes:
+      - ./app:/app
+      - ./courses:/courses
+      - /var/lib/guacamole/recordings:/recordings:ro
+    ports:
+      - "3030:3030"
+    restart: unless-stopped
+    environment:
+      - COURSES_DIR=/courses
+      - PORT=3030
+      - HACKMD_BASE=https://hackmd.io/@MrT-007
+      - GUAC_BASE=https://guac.training.playsap.us
+      - RECORDING_PATH_BASE=/recordings
+      - RECORDINGS_PUBLIC_DIR=/recordings

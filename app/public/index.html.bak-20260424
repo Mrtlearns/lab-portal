@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<title>SAP Lab Portal</title>
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-left">
+      <span class="logo">🎓 SAP Lab Portal</span>
+      <span id="course-title" class="course-title"></span>
+    </div>
+    <div class="topbar-right">
+      <select id="exercise-select" class="exercise-select" disabled>
+        <option value="">— Loading —</option>
+      </select>
+      <button id="btn-prev" class="btn" disabled>&#8592; Prev</button>
+      <button id="btn-next" class="btn" disabled>Next &#8594;</button>
+      <button id="btn-download" class="btn btn-icon" title="Download this lab as .md">&#x2B73;</button>
+      <button id="btn-popout"   class="btn btn-icon" title="Open tutorial in new tab (second screen)">&#x29C9;</button>
+      <button id="btn-panel-wider"    class="btn btn-icon" title="Expand tutorial panel">&#x25C2;</button><button id="btn-panel-narrower" class="btn btn-icon" title="Shrink tutorial panel">&#x25B8;</button><button id="btn-toggle-panel"   class="btn btn-icon" title="Hide tutorial panel">&#x21A6;</button>
+    </div>
+  </header>
+  <main class="split" id="split">
+    <div class="pane-left">
+      <iframe id="guac-frame" src="about:blank" allow="fullscreen" allowfullscreen></iframe>
+    </div>
+    <div class="pane-right" id="pane-right">
+      <div id="tutorial-title" class="tutorial-title"></div>
+      <div id="tutorial-content" class="tutorial-content">
+        <div class="placeholder">Loading&hellip;</div>
+      </div>
+    </div>
+  </main>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.6/marked.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

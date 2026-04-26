@@ -1,0 +1,9 @@
+{
+  "title": "ADM 103 — Central User Administration",
+  "description": "Operating the CUA in SAP ABAP 2023",
+  "steps": [
+    { "title": "Exercise 23 — Operating the CUA: Summary", "file": "ex23.md" },
+    { "title": "Exercise 24 — Role Distribution & Verification", "file": "ex24.md" },
+    { "title": "Exercise 25 — CUA User Monitoring & Reporting", "file": "ex25.md" }
+  ]
+}
