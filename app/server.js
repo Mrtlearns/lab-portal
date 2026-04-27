@@ -6,13 +6,25 @@ import { join, extname } from 'path';
 import fetch from 'node-fetch';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
+import nodemailer from 'nodemailer';
 import multer from 'multer';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
-const PORT = process.env.PORT || 3030;
+const PORT        = process.env.PORT        || 3030;
 const COURSES_DIR = process.env.COURSES_DIR || '/courses';
 const HACKMD_BASE = process.env.HACKMD_BASE || 'https://hackmd.io/@MrT-007';
+const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
+const PORTAL_BASE    = process.env.PORTAL_BASE    || 'https://lab.training.playsap.us';
+const FROM_EMAIL     = process.env.FROM_EMAIL     || 'lab-portal@mail.on-nex.us';
+const SETTINGS_FILE  = join(COURSES_DIR, '.settings.json');
+
+const DEFAULT_SETTINGS = {
+  userSets: [
+    { prefix: 'TRAIN',  label: 'SAP Training',    count: 20, padding: 2 },
+    { prefix: 'claude', label: 'Claude Workshop', count: 20, padding: 2 }
+  ]
+};
 
 app.use(express.json());
 
@@ -52,6 +64,67 @@ async function writeMeta(lab, meta) {
 
 function slugify(name) {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+}
+
+// ── Settings helpers ──────────────────────────────────────────────────────
+async function readSettings() {
+  try {
+    const raw = await readFile(SETTINGS_FILE, 'utf8');
+    return JSON.parse(raw);
+  } catch {
+    return JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
+  }
+}
+
+async function writeSettings(data) {
+  const tmp = SETTINGS_FILE + '.tmp';
+  await writeFile(tmp, JSON.stringify(data, null, 2));
+  await rename(tmp, SETTINGS_FILE);
+}
+
+// ── Events helpers ────────────────────────────────────────────────────────
+function eventsDir(lab)      { return join(COURSES_DIR, lab, '.events'); }
+function eventFile(lab, id)  { return join(eventsDir(lab), `${id}.json`); }
+
+async function readEvent(lab, id) {
+  const raw = await readFile(eventFile(lab, id), 'utf8');
+  return JSON.parse(raw);
+}
+
+async function writeEvent(ev) {
+  const dir = eventsDir(ev.course);
+  await mkdir(dir, { recursive: true });
+  const file = eventFile(ev.course, ev.id);
+  const tmp  = file + '.tmp';
+  await writeFile(tmp, JSON.stringify(ev, null, 2));
+  await rename(tmp, file);
+}
+
+function generateEventId() {
+  const now = new Date();
+  const d   = now.toISOString().slice(0,10).replace(/-/g,'');
+  const t   = now.toTimeString().slice(0,5).replace(':','');
+  const hex = randomBytes(2).toString('hex');
+  return `evt_${d}_${t}_${hex}`;
+}
+
+function studentUsername(set, num) {
+  const padded = String(num).padStart(set.padding || 2, '0');
+  return `${set.prefix}-${padded}`;
+}
+
+// ── Nodemailer transporter (lazy, only if RESEND_API_KEY set) ─────────────
+let mailer = null;
+function getMailer() {
+  if (!mailer && RESEND_API_KEY) {
+    mailer = nodemailer.createTransport({
+      host: 'smtp.resend.com',
+      port: 587,
+      secure: false,
+      auth: { user: 'resend', pass: RESEND_API_KEY }
+    });
+  }
+  return mailer;
 }
 
 // ── READ endpoints (existing, unchanged contract) ─────────────────────────
@@ -993,6 +1066,290 @@ app.use('/media/recordings', express.static(RECORDINGS_PUBLIC_DIR, {
     res.setHeader('Cache-Control', 'private, max-age=300');
   },
 }));
+
+// ── Settings endpoints ────────────────────────────────────────────────────
+app.get('/api/settings', async (req, res) => {
+  try { res.json(await readSettings()); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.put('/api/settings', async (req, res) => {
+  try {
+    const data = req.body;
+    if (!data || !Array.isArray(data.userSets)) return res.status(400).json({ error: 'userSets array required' });
+    await writeSettings(data);
+    res.json(data);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Events endpoints ──────────────────────────────────────────────────────
+
+// List events for a course
+app.get('/api/events', async (req, res) => {
+  try {
+    const course = req.query.course;
+    if (!course) return res.status(400).json({ error: 'course required' });
+    const dir = eventsDir(course);
+    let events = [];
+    if (existsSync(dir)) {
+      const files = await readdir(dir);
+      for (const f of files.filter(f => f.endsWith('.json'))) {
+        try { events.push(JSON.parse(await readFile(join(dir, f), 'utf8'))); } catch {}
+      }
+    }
+    events.sort((a, b) => (b.dateFrom || '').localeCompare(a.dateFrom || ''));
+    res.json(events);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Create event
+app.post('/api/events', async (req, res) => {
+  try {
+    const { course, userSet, dateFrom, dateTo } = req.body || {};
+    if (!course || !userSet || !dateFrom || !dateTo) return res.status(400).json({ error: 'course, userSet, dateFrom, dateTo required' });
+    const settings = await readSettings();
+    if (!settings.userSets.find(u => u.prefix === userSet)) return res.status(400).json({ error: 'unknown userSet' });
+    const ev = { id: generateEventId(), course, userSet, dateFrom, dateTo, timezone: 'America/Los_Angeles', students: [], createdAt: Math.floor(Date.now()/1000) };
+    await writeEvent(ev);
+    res.status(201).json(ev);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Get single event
+app.get('/api/events/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const course = req.query.course;
+    if (!course) return res.status(400).json({ error: 'course query param required' });
+    res.json(await readEvent(course, id));
+  } catch (e) { res.status(404).json({ error: 'Event not found' }); }
+});
+
+// Update event
+app.put('/api/events/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { course, userSet, dateFrom, dateTo } = req.body || {};
+    if (!course) return res.status(400).json({ error: 'course required in body' });
+    const ev = await readEvent(course, id);
+    if (userSet)   ev.userSet   = userSet;
+    if (dateFrom)  ev.dateFrom  = dateFrom;
+    if (dateTo)    ev.dateTo    = dateTo;
+    await writeEvent(ev);
+    res.json(ev);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Delete event
+app.delete('/api/events/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const course = req.query.course;
+    if (!course) return res.status(400).json({ error: 'course query param required' });
+    await rm(eventFile(course, id));
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Get students
+app.get('/api/events/:id/students', async (req, res) => {
+  try {
+    const ev = await readEvent(req.query.course, req.params.id);
+    res.json(ev.students);
+  } catch (e) { res.status(404).json({ error: 'Event not found' }); }
+});
+
+// Add single student
+app.post('/api/events/:id/students', async (req, res) => {
+  try {
+    const { course, name, email } = req.body || {};
+    if (!course || !name) return res.status(400).json({ error: 'course and name required' });
+    const ev = await readEvent(course, req.params.id);
+    const settings = await readSettings();
+    const set = settings.userSets.find(u => u.prefix === ev.userSet) || { count: 20 };
+    if (ev.students.length >= set.count) return res.status(400).json({ error: `Max ${set.count} students for this user set` });
+    const num = ev.students.length + 1;
+    ev.students.push({ num, name: name.trim(), email: (email || '').trim() });
+    await writeEvent(ev);
+    res.status(201).json(ev.students);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Bulk CSV import
+app.post('/api/events/:id/students/import', async (req, res) => {
+  try {
+    const { course, rows } = req.body || {};
+    if (!course || !Array.isArray(rows)) return res.status(400).json({ error: 'course and rows[] required' });
+    const ev = await readEvent(course, req.params.id);
+    const settings = await readSettings();
+    const set = settings.userSets.find(u => u.prefix === ev.userSet) || { count: 20 };
+    let added = 0;
+    for (const r of rows) {
+      if (!r.name) continue;
+      if (ev.students.length >= set.count) break;
+      const num = ev.students.length + 1;
+      ev.students.push({ num, name: r.name.trim(), email: (r.email || '').trim() });
+      added++;
+    }
+    await writeEvent(ev);
+    res.json({ added, students: ev.students });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Reorder students (drag-drop) — MUST be before /:num to avoid route collision
+app.put('/api/events/:id/students/reorder', async (req, res) => {
+  try {
+    const { course, order } = req.body || {};
+    if (!course || !Array.isArray(order)) return res.status(400).json({ error: 'course and order[] required' });
+    const ev = await readEvent(course, req.params.id);
+    // order = new sequence of old num values e.g. [2,1,3]
+    const byNum = Object.fromEntries(ev.students.map(s => [s.num, s]));
+    ev.students = order.map((oldNum, i) => ({ ...byNum[oldNum], num: i + 1 }));
+    await writeEvent(ev);
+    res.json(ev.students);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Update one student
+app.put('/api/events/:id/students/:num', async (req, res) => {
+  try {
+    const { course, name, email } = req.body || {};
+    if (!course) return res.status(400).json({ error: 'course required' });
+    const num = parseInt(req.params.num, 10);
+    const ev  = await readEvent(course, req.params.id);
+    const s   = ev.students.find(s => s.num === num);
+    if (!s) return res.status(404).json({ error: 'Student not found' });
+    if (name  !== undefined) s.name  = name.trim();
+    if (email !== undefined) s.email = email.trim();
+    await writeEvent(ev);
+    res.json(ev.students);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Delete one student (renumber remaining)
+app.delete('/api/events/:id/students/:num', async (req, res) => {
+  try {
+    const course = req.query.course;
+    if (!course) return res.status(400).json({ error: 'course query param required' });
+    const num = parseInt(req.params.num, 10);
+    const ev  = await readEvent(course, req.params.id);
+    ev.students = ev.students.filter(s => s.num !== num).map((s, i) => ({ ...s, num: i + 1 }));
+    await writeEvent(ev);
+    res.json(ev.students);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Send login link emails
+app.post('/api/events/:id/send-links', async (req, res) => {
+  try {
+    const { course } = req.body || {};
+    if (!course) return res.status(400).json({ error: 'course required' });
+    const ev       = await readEvent(course, req.params.id);
+    const meta     = await readMeta(course);
+    const settings = await readSettings();
+    const set      = settings.userSets.find(u => u.prefix === ev.userSet) || { prefix: ev.userSet, padding: 2 };
+    const transport = getMailer();
+    if (!transport) return res.status(503).json({ error: 'Email not configured (RESEND_API_KEY missing)' });
+
+    const fmtDate = d => new Date(d + 'T12:00:00').toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', month: 'short', day: 'numeric', year: 'numeric' });
+    const dateRange = `${fmtDate(ev.dateFrom)} – ${fmtDate(ev.dateTo)}`;
+    const sent = [], failed = [];
+
+    for (const s of ev.students) {
+      if (!s.email) { failed.push({ name: s.name, email: '', error: 'no email' }); continue; }
+      const username = studentUsername(set, s.num);
+      const loginUrl = `${PORTAL_BASE}/?user=${encodeURIComponent(username)}&course=${encodeURIComponent(course)}`;
+      const html = `<div style="font-family:sans-serif;max-width:500px">
+<h2 style="color:#00d4aa">${meta.title}</h2>
+<p>Hi ${s.name},</p>
+<p>You are registered for <strong>${meta.title}</strong> running <strong>${dateRange}</strong> (Los Angeles time).</p>
+<p>Your student number is <strong>#${s.num}</strong> and your login is:</p>
+<p style="background:#1a1d23;border:1px solid #2a2d35;padding:10px;border-radius:6px;font-family:monospace">${username}</p>
+<p><a href="${loginUrl}" style="display:inline-block;background:#00d4aa;color:#000;padding:10px 20px;border-radius:6px;text-decoration:none;font-weight:bold">Open Lab Portal ↗</a></p>
+<p style="color:#888;font-size:0.85em">If the button doesn't work, copy this URL:<br>${loginUrl}</p>
+</div>`;
+      try {
+        await transport.sendMail({ from: FROM_EMAIL, to: s.email, subject: `Your Lab Access — ${meta.title}`, html, text: `Hi ${s.name},\n\nYour login for ${meta.title} (${dateRange}):\nUsername: ${username}\nLink: ${loginUrl}\n` });
+        sent.push({ name: s.name, email: s.email });
+      } catch (err) {
+        failed.push({ name: s.name, email: s.email, error: err.message });
+      }
+    }
+    res.json({ sent: sent.length, failed });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Event landing page ────────────────────────────────────────────────────
+app.get('/events/:id', async (req, res) => {
+  try {
+    // Find event across all courses
+    const { id } = req.params;
+    let ev = null, meta = null;
+    const courses = await readdir(COURSES_DIR, { withFileTypes: true });
+    for (const c of courses.filter(e => e.isDirectory() && !e.name.startsWith('.'))) {
+      const f = eventFile(c.name, id);
+      if (existsSync(f)) {
+        ev   = JSON.parse(await readFile(f, 'utf8'));
+        meta = await readMeta(c.name);
+        break;
+      }
+    }
+    if (!ev) return res.status(404).send(`<!DOCTYPE html><html><head><title>Not Found</title><meta charset="utf-8"><style>body{background:#111317;color:#d4d9e0;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}</style></head><body><h2 style="color:#e05c5c">Event not found</h2></body></html>`);
+
+    const settings = await readSettings();
+    const set = settings.userSets.find(u => u.prefix === ev.userSet) || { prefix: ev.userSet, padding: 2 };
+    const fmtDate = d => new Date(d + 'T12:00:00').toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', month: 'long', day: 'numeric', year: 'numeric' });
+    const dateRange = `${fmtDate(ev.dateFrom)} – ${fmtDate(ev.dateTo)}`;
+
+    const rows = ev.students.map(s => {
+      const username = studentUsername(set, s.num);
+      const url = `${PORTAL_BASE}/?user=${encodeURIComponent(username)}&course=${encodeURIComponent(ev.course)}`;
+      return `<tr><td>${s.num}</td><td>${escHtml(s.name)}</td><td><a href="${url}" target="_blank" class="login-btn">Open Lab ↗</a></td></tr>`;
+    }).join('\n');
+
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>${escHtml(meta.title)}</title>
+  <style>
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    :root{--bg:#111317;--surface:#1a1d23;--border:#2a2d35;--accent:#00d4aa;--accent2:#5794f2;--text:#d4d9e0;--muted:#6b7280}
+    body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;min-height:100vh;padding:32px 16px}
+    .wrap{max-width:860px;margin:0 auto}
+    h1{font-size:1.6rem;color:var(--accent);margin-bottom:8px}
+    .desc{color:var(--muted);margin-bottom:4px}
+    .dates{color:var(--accent2);font-size:0.95rem;margin-bottom:28px}
+    table{width:100%;border-collapse:collapse;background:var(--surface);border:1px solid var(--border);border-radius:8px;overflow:hidden}
+    th{background:#0d1117;padding:10px 14px;text-align:left;font-size:0.75rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);border-bottom:1px solid var(--border)}
+    td{padding:10px 14px;border-bottom:1px solid var(--border);font-size:0.9rem}
+    tr:last-child td{border-bottom:none}
+    .login-btn{display:inline-block;background:var(--accent);color:#071410;padding:5px 14px;border-radius:5px;text-decoration:none;font-weight:600;font-size:0.82rem}
+    .login-btn:hover{background:#00bfa0}
+    .badge{display:inline-block;background:var(--accent2);color:#fff;border-radius:3px;padding:1px 7px;font-size:0.75rem;margin-left:8px}
+    @media(max-width:500px){td,th{padding:8px 10px}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>${escHtml(meta.title)}</h1>
+    <div class="desc">${escHtml(meta.description || '')}</div>
+    <div class="dates">📅 ${dateRange} &nbsp;<span class="badge">${set.label || ev.userSet}</span></div>
+    <table>
+      <thead><tr><th>#</th><th>Name</th><th>Lab Access</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="3" style="color:var(--muted);text-align:center;padding:24px">No students registered yet.</td></tr>'}</tbody>
+    </table>
+  </div>
+</body>
+</html>`;
+    res.type('text/html').send(html);
+  } catch (e) { res.status(500).send(`Error: ${e.message}`); }
+});
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
 
 // ── Static + SPA fallback ─────────────────────────────────────────────────
 app.use(express.static(join(__dirname, 'public')));

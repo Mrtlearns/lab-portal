@@ -17,3 +17,6 @@ services:
       - GUAC_BASE=https://guac.training.playsap.us
       - RECORDING_PATH_BASE=/recordings
       - RECORDINGS_PUBLIC_DIR=/recordings
+      - RESEND_API_KEY=re_VWS4WV2b_NWZXGhPsEFtRscNXvSSVLgGd
+      - PORTAL_BASE=https://lab.training.playsap.us
+      - FROM_EMAIL=lab-portal@mail.on-nex.us

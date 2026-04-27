@@ -158,6 +158,36 @@ select.train-select { background: var(--surface2); border: 1px solid var(--borde
 .rec-row .rec-actions button:disabled { opacity: 0.4; cursor: not-allowed; }
 .rec-empty { padding: 30px 16px; text-align: center; color: var(--text-muted); font-size: 0.85rem; }
 .rec-player-modal video { width: 100%; max-height: 70vh; background: #000; border-radius: 4px; }
+
+/* ── Events ── */
+.event-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.event-row:last-child { border-bottom: none; }
+.event-dates { font-size: 0.88rem; color: var(--accent2); flex: 1; }
+.event-userset { font-size: 0.72rem; background: var(--surface2); border: 1px solid var(--border); border-radius: 3px; padding: 1px 6px; color: var(--text-muted); }
+.event-count { font-size: 0.75rem; color: var(--text-muted); }
+.event-empty { color: var(--text-muted); font-size: 0.85rem; padding: 12px 0; }
+
+/* ── Event roster modal ── */
+.roster-header { margin-bottom: 12px; }
+.roster-header h4 { color: var(--accent); margin-bottom: 2px; }
+.roster-header .roster-dates { font-size: 0.82rem; color: var(--text-muted); }
+.student-table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
+.student-table th { font-size: 0.7rem; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); padding: 6px 8px; border-bottom: 1px solid var(--border); text-align: left; }
+.student-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); font-size: 0.85rem; vertical-align: middle; }
+.student-table tr:last-child td { border-bottom: none; }
+.drag-handle { cursor: grab; color: var(--text-muted); padding: 0 4px; user-select: none; font-size: 1rem; }
+.drag-handle:active { cursor: grabbing; }
+.student-row.drag-over { background: rgba(87,148,242,.15); border-top: 2px solid var(--accent2); }
+.add-student-row { display: flex; gap: 6px; margin-top: 8px; align-items: center; }
+.add-student-row input { flex: 1; }
+.roster-foot { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; align-items: center; }
+.roster-cap-note { font-size: 0.75rem; color: var(--text-muted); margin-left: auto; }
+
+/* ── Settings modal ── */
+.userset-table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
+.userset-table th { font-size: 0.7rem; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); padding: 5px 6px; border-bottom: 1px solid var(--border); text-align: left; }
+.userset-table td { padding: 5px 6px; border-bottom: 1px solid var(--border); font-size: 0.83rem; }
+.userset-table td input { width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 3px 6px; font-size: 0.83rem; }
 </style>
 </head>
 <body>
@@ -165,6 +195,9 @@ select.train-select { background: var(--surface2); border: 1px solid var(--borde
 <div class="topbar">
   <span class="topbar-title">Lab Portal</span>
   <span class="topbar-sub">Instructor Management</span>
+  <div style="margin-left:auto">
+    <button class="btn btn-sm" onclick="openSettings()" title="Manage user sets (TRAIN-XX, claude-XX, etc.)">⚙ Settings</button>
+  </div>
 </div>
 
 <div class="main">
@@ -278,6 +311,93 @@ select.train-select { background: var(--surface2); border: 1px solid var(--borde
   </div>
 </div>
 
+<!-- Modal: New Event -->
+<div class="modal-bg hidden" id="modal-event-new">
+  <div class="modal">
+    <h3>New Event</h3>
+    <div class="field">
+      <label>User Set</label>
+      <select id="ne-userset" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:6px 8px"></select>
+    </div>
+    <div style="display:flex;gap:12px">
+      <div class="field" style="flex:1"><label>Date From <small style="color:var(--text-muted)">(LA time)</small></label><input id="ne-datefrom" type="date"></div>
+      <div class="field" style="flex:1"><label>Date To <small style="color:var(--text-muted)">(LA time)</small></label><input id="ne-dateto" type="date"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeModal('modal-event-new')">Cancel</button>
+      <button class="btn btn-accent" onclick="saveNewEvent()">Create Event</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: Edit Event -->
+<div class="modal-bg hidden" id="modal-event-edit">
+  <div class="modal">
+    <h3>Edit Event</h3>
+    <div class="field">
+      <label>User Set</label>
+      <select id="ee-userset" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:6px 8px"></select>
+    </div>
+    <div style="display:flex;gap:12px">
+      <div class="field" style="flex:1"><label>Date From <small style="color:var(--text-muted)">(LA time)</small></label><input id="ee-datefrom" type="date"></div>
+      <div class="field" style="flex:1"><label>Date To <small style="color:var(--text-muted)">(LA time)</small></label><input id="ee-dateto" type="date"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeModal('modal-event-edit')">Cancel</button>
+      <button class="btn btn-accent" onclick="saveEventEdit()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: Event Roster -->
+<div class="modal-bg hidden" id="modal-event-roster">
+  <div class="modal" style="width:660px;max-width:96vw">
+    <div class="roster-header">
+      <h4 id="roster-title">Class Roster</h4>
+      <div class="roster-dates" id="roster-dates"></div>
+    </div>
+    <div style="overflow-x:auto">
+      <table class="student-table">
+        <thead><tr><th></th><th>#</th><th>Name</th><th>Email</th><th>Login</th><th></th></tr></thead>
+        <tbody id="roster-tbody"></tbody>
+      </table>
+    </div>
+    <div class="add-student-row">
+      <input id="add-name" placeholder="Full name" style="flex:1.5">
+      <input id="add-email" placeholder="Email (optional)" style="flex:2" type="email">
+      <button class="btn btn-sm btn-accent" onclick="addStudent()">+ Add</button>
+    </div>
+    <div class="roster-foot">
+      <label class="btn btn-sm" style="cursor:pointer">
+        📥 Import CSV
+        <input id="csv-input" type="file" accept=".csv,text/csv" style="display:none" onchange="importStudentCSV(this)">
+      </label>
+      <button class="btn btn-sm" onclick="sendLoginLinks()" id="btn-send-links">📧 Send Login Links</button>
+      <span class="roster-cap-note" id="roster-cap-note"></span>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeModal('modal-event-roster')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: Portal Settings (User Sets) -->
+<div class="modal-bg hidden" id="modal-settings">
+  <div class="modal" style="width:600px;max-width:95vw">
+    <h3>Portal Settings — User Sets</h3>
+    <p style="font-size:0.82rem;color:var(--text-muted);margin-bottom:12px">Define the Guacamole account prefixes available for events. Student #1 → PREFIX-01, #2 → PREFIX-02, etc.</p>
+    <table class="userset-table">
+      <thead><tr><th>Label</th><th>Prefix</th><th>Max</th><th>Pad</th><th></th></tr></thead>
+      <tbody id="userset-tbody"></tbody>
+    </table>
+    <button class="btn btn-sm" onclick="addUserSetRow()" style="margin-bottom:8px">+ Add User Set</button>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeModal('modal-settings')">Cancel</button>
+      <button class="btn btn-accent" onclick="saveSettings()">Save Settings</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const PORTAL_BASE = location.origin;
 let courses = [];
@@ -360,6 +480,15 @@ function renderDetail(course) {
       </div>
     </div>
 
+    <!-- Events -->
+    <div class="card">
+      <div class="card-title-row">
+        <div class="card-title">Events</div>
+        <button class="btn btn-sm btn-accent" onclick="openNewEvent()">+ New Event</button>
+      </div>
+      <div id="event-list"><div class="event-empty">Loading…</div></div>
+    </div>
+
     <!-- Grafana embed -->
     <div class="card">
       <div class="card-title-row">
@@ -432,6 +561,7 @@ function renderDetail(course) {
 
   updateUrl();
   renderFeedback();
+  renderEvents(course.code);
   initGfTile();
 }
 
@@ -1109,6 +1239,297 @@ renderDetail = function(course) {
   _origRenderDetail.apply(this, arguments);
   loadRecordings();
 };
+
+// ── Init ──────────────────────────────────────────────────────────────────
+loadCourses();
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EVENTS & SETTINGS
+// ═══════════════════════════════════════════════════════════════════════════
+
+let portalSettings = null;
+let activeEventId  = null;  // event open in roster modal
+let editEventId    = null;  // event open in edit modal
+let dragSrcNum     = null;  // drag-reorder source student num
+
+// ── Settings ──────────────────────────────────────────────────────────────
+async function loadSettings() {
+  portalSettings = await api('GET', '/api/settings');
+  return portalSettings;
+}
+
+async function openSettings() {
+  const s = await loadSettings();
+  renderUserSetTable(s.userSets);
+  openModal('modal-settings');
+}
+
+function renderUserSetTable(sets) {
+  document.getElementById('userset-tbody').innerHTML = sets.map((u, i) => `
+    <tr data-idx="${i}">
+      <td><input class="us-label"  value="${escHtmlAttr(u.label)}"  placeholder="SAP Training"></td>
+      <td><input class="us-prefix" value="${escHtmlAttr(u.prefix)}" placeholder="TRAIN"></td>
+      <td><input class="us-count"  value="${u.count}"  type="number" min="1" max="100" style="width:60px"></td>
+      <td><input class="us-pad"    value="${u.padding}" type="number" min="1" max="4"  style="width:50px"></td>
+      <td><button class="btn btn-sm btn-danger" onclick="removeUserSetRow(${i})">✕</button></td>
+    </tr>`).join('');
+}
+
+function addUserSetRow() {
+  const tbody = document.getElementById('userset-tbody');
+  const idx = tbody.querySelectorAll('tr').length;
+  const row = document.createElement('tr');
+  row.dataset.idx = idx;
+  row.innerHTML = `
+    <td><input class="us-label"  placeholder="Label" value=""></td>
+    <td><input class="us-prefix" placeholder="PREFIX" value=""></td>
+    <td><input class="us-count"  value="20" type="number" min="1" max="100" style="width:60px"></td>
+    <td><input class="us-pad"    value="2"  type="number" min="1" max="4"  style="width:50px"></td>
+    <td><button class="btn btn-sm btn-danger" onclick="this.closest('tr').remove()">✕</button></td>`;
+  tbody.appendChild(row);
+}
+
+function removeUserSetRow(idx) {
+  const rows = document.querySelectorAll('#userset-tbody tr');
+  rows[idx]?.remove();
+}
+
+async function saveSettings() {
+  const rows = document.querySelectorAll('#userset-tbody tr');
+  const userSets = [...rows].map(r => ({
+    label:   r.querySelector('.us-label').value.trim(),
+    prefix:  r.querySelector('.us-prefix').value.trim(),
+    count:   parseInt(r.querySelector('.us-count').value, 10) || 20,
+    padding: parseInt(r.querySelector('.us-pad').value,   10) || 2
+  })).filter(u => u.prefix);
+  await api('PUT', '/api/settings', { userSets });
+  portalSettings = { userSets };
+  closeModal('modal-settings');
+  toast('Settings saved');
+}
+
+// ── Events ────────────────────────────────────────────────────────────────
+async function renderEvents(courseCode) {
+  const el = document.getElementById('event-list');
+  if (!el) return;
+  try {
+    const events = await api('GET', `/api/events?course=${encodeURIComponent(courseCode)}`);
+    if (!events.length) { el.innerHTML = '<div class="event-empty">No events yet — create one to schedule a class run.</div>'; return; }
+    el.innerHTML = events.map(ev => {
+      const from = fmtEventDate(ev.dateFrom);
+      const to   = fmtEventDate(ev.dateTo);
+      const same = ev.dateFrom === ev.dateTo;
+      const dateStr = same ? from : `${from} – ${to}`;
+      return `<div class="event-row">
+        <span class="event-dates">${dateStr}</span>
+        <span class="event-userset">${escHtml(ev.userSet)}</span>
+        <span class="event-count">${ev.students.length} student${ev.students.length !== 1 ? 's' : ''}</span>
+        <button class="btn btn-sm" onclick="openEventRoster('${ev.id}','${courseCode}')" title="Manage roster">👥</button>
+        <a class="btn btn-sm" href="/events/${ev.id}" target="_blank" title="Open landing page">🔗</a>
+        <button class="btn btn-sm" onclick="openEditEvent('${ev.id}','${courseCode}')" title="Edit dates">✎</button>
+        <button class="btn btn-sm btn-danger" onclick="deleteEvent('${ev.id}','${courseCode}')" title="Delete event">✕</button>
+      </div>`;
+    }).join('');
+  } catch (e) { el.innerHTML = `<div class="event-empty">Failed to load events: ${e.message}</div>`; }
+}
+
+function fmtEventDate(d) {
+  if (!d) return '';
+  const [y,m,day] = d.split('-').map(Number);
+  return new Date(y, m-1, day).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+async function populateUserSetDropdown(selectId, currentValue) {
+  const s = await loadSettings();
+  const sel = document.getElementById(selectId);
+  sel.innerHTML = s.userSets.map(u =>
+    `<option value="${escHtmlAttr(u.prefix)}" ${u.prefix === currentValue ? 'selected' : ''}>${escHtml(u.label)} (${escHtml(u.prefix)}-XX)</option>`
+  ).join('');
+}
+
+async function openNewEvent() {
+  await populateUserSetDropdown('ne-userset', null);
+  document.getElementById('ne-datefrom').value = '';
+  document.getElementById('ne-dateto').value   = '';
+  openModal('modal-event-new');
+}
+
+async function saveNewEvent() {
+  const userSet  = document.getElementById('ne-userset').value;
+  const dateFrom = document.getElementById('ne-datefrom').value;
+  const dateTo   = document.getElementById('ne-dateto').value;
+  if (!dateFrom || !dateTo) { toast('Please set both dates'); return; }
+  try {
+    await api('POST', '/api/events', { course: activeLab, userSet, dateFrom, dateTo });
+    closeModal('modal-event-new');
+    toast('Event created');
+    renderEvents(activeLab);
+  } catch (e) { toast(`Error: ${e.message}`); }
+}
+
+async function openEditEvent(id, course) {
+  try {
+    const ev = await api('GET', `/api/events/${id}?course=${encodeURIComponent(course)}`);
+    editEventId = id;
+    await populateUserSetDropdown('ee-userset', ev.userSet);
+    document.getElementById('ee-datefrom').value = ev.dateFrom || '';
+    document.getElementById('ee-dateto').value   = ev.dateTo   || '';
+    openModal('modal-event-edit');
+  } catch (e) { toast(`Failed to load event: ${e.message}`); }
+}
+
+async function saveEventEdit() {
+  const userSet  = document.getElementById('ee-userset').value;
+  const dateFrom = document.getElementById('ee-datefrom').value;
+  const dateTo   = document.getElementById('ee-dateto').value;
+  if (!dateFrom || !dateTo) { toast('Please set both dates'); return; }
+  try {
+    await api('PUT', `/api/events/${editEventId}`, { course: activeLab, userSet, dateFrom, dateTo });
+    closeModal('modal-event-edit');
+    toast('Event updated');
+    renderEvents(activeLab);
+  } catch (e) { toast(`Error: ${e.message}`); }
+}
+
+async function deleteEvent(id, course) {
+  if (!confirm('Delete this event and its roster? This cannot be undone.')) return;
+  try {
+    await api('DELETE', `/api/events/${id}?course=${encodeURIComponent(course)}`);
+    toast('Event deleted');
+    renderEvents(course);
+  } catch (e) { toast(`Error: ${e.message}`); }
+}
+
+// ── Roster modal ──────────────────────────────────────────────────────────
+async function openEventRoster(id, course) {
+  activeEventId = id;
+  const ev   = await api('GET', `/api/events/${id}?course=${encodeURIComponent(course)}`);
+  const meta = await api('GET', `/api/courses/${course}/meta`);
+  const s    = await loadSettings();
+  const set  = s.userSets.find(u => u.prefix === ev.userSet) || { count: 20 };
+
+  document.getElementById('roster-title').textContent = meta.title;
+  const from = fmtEventDate(ev.dateFrom), to = fmtEventDate(ev.dateTo);
+  document.getElementById('roster-dates').textContent = `${from} – ${to}  ·  ${ev.userSet}-XX`;
+  document.getElementById('roster-cap-note').textContent = `Max ${set.count} students`;
+  document.getElementById('add-name').value  = '';
+  document.getElementById('add-email').value = '';
+
+  renderRosterTable(ev.students, ev.userSet, set, course);
+  openModal('modal-event-roster');
+}
+
+function renderRosterTable(students, userSetPrefix, set, course) {
+  const tbody = document.getElementById('roster-tbody');
+  tbody.innerHTML = students.map(s => {
+    const username = `${userSetPrefix}-${String(s.num).padStart(set.padding || 2, '0')}`;
+    return `<tr class="student-row" data-num="${s.num}" draggable="true">
+      <td><span class="drag-handle" title="Drag to reorder">⠿</span></td>
+      <td style="color:var(--accent2);font-weight:700">${s.num}</td>
+      <td>${escHtml(s.name)}</td>
+      <td style="color:var(--text-muted)">${escHtml(s.email || '—')}</td>
+      <td style="font-size:0.78rem;color:var(--text-muted);font-family:monospace">${escHtml(username)}</td>
+      <td><button class="btn btn-sm btn-danger" onclick="deleteStudent(${s.num})">✕</button></td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="6" style="color:var(--text-muted);text-align:center;padding:16px">No students yet.</td></tr>';
+
+  // Attach drag events
+  tbody.querySelectorAll('.student-row').forEach(row => {
+    row.addEventListener('dragstart', e => {
+      dragSrcNum = parseInt(row.dataset.num, 10);
+      e.dataTransfer.effectAllowed = 'move';
+    });
+    row.addEventListener('dragover', e => {
+      e.preventDefault();
+      tbody.querySelectorAll('.student-row').forEach(r => r.classList.remove('drag-over'));
+      row.classList.add('drag-over');
+    });
+    row.addEventListener('dragleave', () => row.classList.remove('drag-over'));
+    row.addEventListener('drop', async e => {
+      e.preventDefault();
+      row.classList.remove('drag-over');
+      const dropNum = parseInt(row.dataset.num, 10);
+      if (dragSrcNum === dropNum) return;
+      // Build new order: current nums, move dragSrcNum to before dropNum
+      const currentOrder = [...tbody.querySelectorAll('.student-row')].map(r => parseInt(r.dataset.num, 10));
+      const filtered = currentOrder.filter(n => n !== dragSrcNum);
+      const insertAt = filtered.indexOf(dropNum);
+      filtered.splice(insertAt, 0, dragSrcNum);
+      try {
+        const updated = await api('PUT', `/api/events/${activeEventId}/students/reorder`, { course: activeLab, order: filtered });
+        const s = await loadSettings();
+        const ev = await api('GET', `/api/events/${activeEventId}?course=${encodeURIComponent(activeLab)}`);
+        const set = s.userSets.find(u => u.prefix === ev.userSet) || { count: 20 };
+        renderRosterTable(updated, ev.userSet, set, activeLab);
+        renderEvents(activeLab);
+      } catch (err) { toast(`Reorder failed: ${err.message}`); }
+    });
+  });
+}
+
+async function addStudent() {
+  const name  = document.getElementById('add-name').value.trim();
+  const email = document.getElementById('add-email').value.trim();
+  if (!name) { toast('Name is required'); return; }
+  try {
+    await api('POST', `/api/events/${activeEventId}/students`, { course: activeLab, name, email });
+    document.getElementById('add-name').value  = '';
+    document.getElementById('add-email').value = '';
+    const ev  = await api('GET', `/api/events/${activeEventId}?course=${encodeURIComponent(activeLab)}`);
+    const s   = await loadSettings();
+    const set = s.userSets.find(u => u.prefix === ev.userSet) || { count: 20 };
+    renderRosterTable(ev.students, ev.userSet, set, activeLab);
+    renderEvents(activeLab);
+  } catch (e) { toast(`Error: ${e.message}`); }
+}
+
+async function deleteStudent(num) {
+  if (!confirm(`Remove student #${num} from the roster?`)) return;
+  try {
+    const updated = await api('DELETE', `/api/events/${activeEventId}/students/${num}?course=${encodeURIComponent(activeLab)}`);
+    const ev  = await api('GET', `/api/events/${activeEventId}?course=${encodeURIComponent(activeLab)}`);
+    const s   = await loadSettings();
+    const set = s.userSets.find(u => u.prefix === ev.userSet) || { count: 20 };
+    renderRosterTable(ev.students, ev.userSet, set, activeLab);
+    renderEvents(activeLab);
+  } catch (e) { toast(`Error: ${e.message}`); }
+}
+
+async function importStudentCSV(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const text = await file.text();
+  const rows = text.trim().split('\n').slice(1).map(line => {
+    const parts = line.split(',').map(p => p.replace(/^"|"$/g, '').trim());
+    return { name: parts[0] || '', email: parts[1] || '' };
+  }).filter(r => r.name);
+  if (!rows.length) { toast('No valid rows found in CSV'); input.value = ''; return; }
+  try {
+    const result = await api('POST', `/api/events/${activeEventId}/students/import`, { course: activeLab, rows });
+    toast(`Imported ${result.added} student${result.added !== 1 ? 's' : ''}`);
+    const ev  = await api('GET', `/api/events/${activeEventId}?course=${encodeURIComponent(activeLab)}`);
+    const s   = await loadSettings();
+    const set = s.userSets.find(u => u.prefix === ev.userSet) || { count: 20 };
+    renderRosterTable(ev.students, ev.userSet, set, activeLab);
+    renderEvents(activeLab);
+  } catch (e) { toast(`Import error: ${e.message}`); }
+  input.value = '';
+}
+
+async function sendLoginLinks() {
+  const btn = document.getElementById('btn-send-links');
+  btn.disabled = true;
+  try {
+    const r = await api('POST', `/api/events/${activeEventId}/send-links`, { course: activeLab });
+    toast(`Sent ${r.sent} email${r.sent !== 1 ? 's' : ''}${r.failed.length ? ` (${r.failed.length} failed)` : ''}`);
+    if (r.failed.length) console.warn('Failed sends:', r.failed);
+  } catch (e) { toast(`Send failed: ${e.message}`); }
+  finally { btn.disabled = false; }
+}
+
+// ── Shared HTML escape helper ──────────────────────────────────────────────
+function escHtml(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function escHtmlAttr(s) { return escHtml(s); }
 
 // ── Init ──────────────────────────────────────────────────────────────────
 loadCourses();
