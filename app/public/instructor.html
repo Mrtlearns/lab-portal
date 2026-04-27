@@ -367,11 +367,29 @@ select.train-select { background: var(--surface2); border: 1px solid var(--borde
       <input id="add-email" placeholder="Email (optional)" style="flex:2" type="email">
       <button class="btn btn-sm btn-accent" onclick="addStudent()">+ Add</button>
     </div>
+
+    <!-- Paste import area (collapsed by default) -->
+    <div id="paste-import-area" style="display:none;padding:10px 0 4px">
+      <div style="font-size:0.75rem;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);font-weight:700;margin-bottom:5px">
+        Paste students — one per line: <code style="font-size:0.8rem;background:var(--surface2);padding:1px 5px;border-radius:3px">name, email</code>
+        <span style="font-weight:400;color:var(--text-muted)"> (email optional)</span>
+      </div>
+      <textarea id="paste-import-text" rows="5"
+        style="width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:7px 10px;border-radius:var(--radius);font-size:0.87rem;font-family:monospace;resize:vertical"
+        placeholder="John Smith, john@example.com&#10;Jane Doe, jane@example.com&#10;Bob Jones"></textarea>
+      <div style="display:flex;gap:8px;margin-top:6px">
+        <button class="btn btn-sm btn-accent" onclick="importPastedStudents()">Import</button>
+        <button class="btn btn-sm" onclick="togglePasteArea(false)">Cancel</button>
+      </div>
+    </div>
+
     <div class="roster-foot">
+      <button class="btn btn-sm" onclick="togglePasteArea(true)" id="btn-paste-toggle">📋 Paste</button>
       <label class="btn btn-sm" style="cursor:pointer">
         📥 Import CSV
         <input id="csv-input" type="file" accept=".csv,text/csv" style="display:none" onchange="importStudentCSV(this)">
       </label>
+      <button class="btn btn-sm" onclick="downloadRosterCSV()" title="Download roster as CSV">⬇ CSV</button>
       <button class="btn btn-sm" onclick="sendLoginLinks()" id="btn-send-links">📧 Send Login Links</button>
       <button class="btn btn-sm" onclick="openEmailCompose()" id="btn-adhoc-email">✉ Email…</button>
       <span class="roster-cap-note" id="roster-cap-note"></span>
@@ -1452,6 +1470,7 @@ async function openEventRoster(id, course) {
   document.getElementById('roster-cap-note').textContent = `Max ${set.count} students`;
   document.getElementById('add-name').value  = '';
   document.getElementById('add-email').value = '';
+  togglePasteArea(false);
 
   renderRosterTable(ev.students, ev.userSet, set, course);
   openModal('modal-event-roster');
@@ -1587,6 +1606,52 @@ async function deleteStudent(num) {
     renderRosterTable(ev.students, ev.userSet, set, activeLab);
     renderEvents(activeLab);
   } catch (e) { toast(`Error: ${e.message}`); }
+}
+
+// ── Paste import ─────────────────────────────────────────────────────────
+function togglePasteArea(show) {
+  const area = document.getElementById('paste-import-area');
+  const btn  = document.getElementById('btn-paste-toggle');
+  area.style.display = show ? 'block' : 'none';
+  btn.style.display  = show ? 'none'  : '';
+  if (show) { document.getElementById('paste-import-text').value = ''; document.getElementById('paste-import-text').focus(); }
+}
+
+async function importPastedStudents() {
+  const text = document.getElementById('paste-import-text').value.trim();
+  if (!text) { toast('Nothing to import.'); return; }
+  const lines = text.split('\n');
+  const firstCell = lines[0]?.split(',')[0]?.replace(/^"|"$/g,'').trim().toLowerCase();
+  const dataLines = (firstCell === 'name' || firstCell === 'full name' || firstCell === 'student') ? lines.slice(1) : lines;
+  const rows = dataLines.map(line => {
+    const parts = line.split(',').map(p => p.replace(/^"|"$/g,'').trim());
+    return { name: parts[0] || '', email: parts[1] || '' };
+  }).filter(r => r.name);
+  if (!rows.length) { toast('No valid rows found.'); return; }
+  try {
+    const result = await api('POST', `/api/events/${activeEventId}/students/import`, { course: activeLab, rows });
+    toast(`Imported ${result.added} student${result.added !== 1 ? 's' : ''}`);
+    const ev  = await api('GET', `/api/events/${activeEventId}?course=${encodeURIComponent(activeLab)}`);
+    const s   = await loadSettings();
+    const set = s.userSets.find(u => u.prefix === ev.userSet) || { count: 20 };
+    renderRosterTable(ev.students, ev.userSet, set, activeLab);
+    renderEvents(activeLab);
+    togglePasteArea(false);
+  } catch (e) { toast(`Import error: ${e.message}`); }
+}
+
+// ── Download roster as CSV ───────────────────────────────────────────────
+function downloadRosterCSV() {
+  if (!currentRosterStudents?.length) { toast('No students to export.'); return; }
+  const lines = ['name,email', ...currentRosterStudents.map(s => `"${(s.name||'').replace(/"/g,'""')}","${(s.email||'').replace(/"/g,'""')}"`)] ;
+  const blob = new Blob([lines.join('\r\n')], { type: 'text/csv' });
+  const url  = URL.createObjectURL(blob);
+  const a    = Object.assign(document.createElement('a'), {
+    href: url,
+    download: `${activeLab || 'roster'}-students.csv`
+  });
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 async function importStudentCSV(input) {
