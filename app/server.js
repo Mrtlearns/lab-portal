@@ -1263,13 +1263,69 @@ app.post('/api/events/:id/send-links', async (req, res) => {
 <h2 style="color:#00d4aa">${meta.title}</h2>
 <p>Hi ${s.name},</p>
 <p>You are registered for <strong>${meta.title}</strong> running <strong>${dateRange}</strong> (Los Angeles time).</p>
-<p>Your student number is <strong>#${s.num}</strong> and your login is:</p>
+<p>Your student number is <strong>#${String(s.num).padStart(set.padding || 2, '0')}</strong> and your login is:</p>
 <p style="background:#1a1d23;border:1px solid #2a2d35;padding:10px;border-radius:6px;font-family:monospace">${username}</p>
 <p><a href="${loginUrl}" style="display:inline-block;background:#00d4aa;color:#000;padding:10px 20px;border-radius:6px;text-decoration:none;font-weight:bold">Open Lab Portal ↗</a></p>
 <p style="color:#888;font-size:0.85em">If the button doesn't work, copy this URL:<br>${loginUrl}</p>
 </div>`;
       try {
         await transport.sendMail({ from: FROM_EMAIL, to: s.email, subject: `Your Lab Access — ${meta.title}`, html, text: `Hi ${s.name},\n\nYour login for ${meta.title} (${dateRange}):\nUsername: ${username}\nLink: ${loginUrl}\n` });
+        sent.push({ name: s.name, email: s.email });
+      } catch (err) {
+        failed.push({ name: s.name, email: s.email, error: err.message });
+      }
+    }
+    res.json({ sent: sent.length, failed });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Ad-hoc email to selected students ────────────────────────────────────
+app.post('/api/events/:id/send-adhoc', async (req, res) => {
+  try {
+    const { course, subject, body, nums } = req.body || {};
+    if (!course)  return res.status(400).json({ error: 'course required' });
+    if (!subject) return res.status(400).json({ error: 'subject required' });
+    if (!body)    return res.status(400).json({ error: 'body required' });
+
+    const ev       = await readEvent(course, req.params.id);
+    const meta     = await readMeta(course);
+    const settings = await readSettings();
+    const set      = settings.userSets.find(u => u.prefix === ev.userSet) || { prefix: ev.userSet, padding: 2 };
+    const transport = getMailer();
+    if (!transport) return res.status(503).json({ error: 'Email not configured (RESEND_API_KEY missing)' });
+
+    // Filter by nums array; if empty / omitted → all students
+    const targets = (Array.isArray(nums) && nums.length > 0)
+      ? ev.students.filter(s => nums.includes(s.num))
+      : ev.students;
+
+    const fmtDate  = d => new Date(d + 'T12:00:00').toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', month: 'short', day: 'numeric', year: 'numeric' });
+    const dateRange = `${fmtDate(ev.dateFrom)} – ${fmtDate(ev.dateTo)}`;
+
+    const sent = [], failed = [];
+    for (const s of targets) {
+      if (!s.email) { failed.push({ name: s.name, email: '', error: 'no email' }); continue; }
+      const username = studentUsername(set, s.num);
+      const loginUrl = `${PORTAL_BASE}/?user=${encodeURIComponent(username)}&course=${encodeURIComponent(course)}`;
+
+      // Substitute placeholders in subject and body
+      const replace = str => str
+        .replace(/\{name\}/g,     s.name)
+        .replace(/\{username\}/g, username)
+        .replace(/\{login\}/g,    loginUrl);
+
+      const personalSubject = replace(subject);
+      const personalText    = replace(body);
+      // Wrap plain text in minimal HTML (preserve newlines)
+      const personalHtml = `<div style="font-family:sans-serif;max-width:560px;line-height:1.6">
+<h2 style="color:#00d4aa;margin-bottom:16px">${escHtml(meta.title)}</h2>
+${personalText.split('\n').map(l => l ? `<p style="margin:0 0 10px">${escHtml(l)}</p>` : '<br>').join('')}
+<hr style="border:none;border-top:1px solid #2a2d35;margin:20px 0">
+<p style="font-size:0.8rem;color:#888">${dateRange} · ${escHtml(meta.title)}</p>
+</div>`;
+
+      try {
+        await transport.sendMail({ from: FROM_EMAIL, to: s.email, subject: personalSubject, html: personalHtml, text: personalText });
         sent.push({ name: s.name, email: s.email });
       } catch (err) {
         failed.push({ name: s.name, email: s.email, error: err.message });

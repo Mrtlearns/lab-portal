@@ -373,10 +373,47 @@ select.train-select { background: var(--surface2); border: 1px solid var(--borde
         <input id="csv-input" type="file" accept=".csv,text/csv" style="display:none" onchange="importStudentCSV(this)">
       </label>
       <button class="btn btn-sm" onclick="sendLoginLinks()" id="btn-send-links">📧 Send Login Links</button>
+      <button class="btn btn-sm" onclick="openEmailCompose()" id="btn-adhoc-email">✉ Email…</button>
       <span class="roster-cap-note" id="roster-cap-note"></span>
     </div>
     <div class="modal-foot">
       <button class="btn" onclick="closeModal('modal-event-roster')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: Ad-hoc Email Compose -->
+<div class="modal-bg hidden" id="modal-email-compose">
+  <div class="modal" style="width:580px;max-width:96vw">
+    <h3>Send Email to Students</h3>
+    <p style="font-size:0.82rem;color:var(--text-muted);margin-bottom:12px">Select recipients, enter a subject and message, then send.</p>
+
+    <!-- Recipients -->
+    <div style="margin-bottom:12px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+        <span style="font-size:0.75rem;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);font-weight:700">Recipients</span>
+        <button class="btn btn-sm" onclick="toggleAllRecipients(true)"  style="padding:2px 8px;font-size:0.75rem">All</button>
+        <button class="btn btn-sm" onclick="toggleAllRecipients(false)" style="padding:2px 8px;font-size:0.75rem">None</button>
+      </div>
+      <div id="email-recipient-list" style="max-height:160px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius);padding:6px 10px;display:flex;flex-direction:column;gap:4px"></div>
+    </div>
+
+    <!-- Subject -->
+    <div style="margin-bottom:10px">
+      <label style="font-size:0.75rem;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);font-weight:700;display:block;margin-bottom:4px">Subject</label>
+      <input id="compose-subject" type="text" style="width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:7px 10px;border-radius:var(--radius);font-size:0.9rem" placeholder="Email subject…">
+    </div>
+
+    <!-- Body -->
+    <div style="margin-bottom:12px">
+      <label style="font-size:0.75rem;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);font-weight:700;display:block;margin-bottom:4px">Message</label>
+      <textarea id="compose-body" rows="7" style="width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:7px 10px;border-radius:var(--radius);font-size:0.9rem;resize:vertical;font-family:inherit" placeholder="Type your message here…&#10;&#10;Use {name} to personalise with each student's name.&#10;Use {login} for their login URL.&#10;Use {username} for their Guacamole username."></textarea>
+      <div style="font-size:0.75rem;color:var(--text-muted);margin-top:3px">Placeholders: <code>{name}</code> · <code>{username}</code> · <code>{login}</code></div>
+    </div>
+
+    <div class="modal-foot">
+      <button class="btn" onclick="closeModal('modal-email-compose')">Cancel</button>
+      <button class="btn btn-accent" onclick="sendAdhocEmail()" id="btn-compose-send">Send</button>
     </div>
   </div>
 </div>
@@ -1247,10 +1284,11 @@ loadCourses();
 // EVENTS & SETTINGS
 // ═══════════════════════════════════════════════════════════════════════════
 
-let portalSettings = null;
-let activeEventId  = null;  // event open in roster modal
-let editEventId    = null;  // event open in edit modal
-let dragSrcNum     = null;  // drag-reorder source student num
+let portalSettings         = null;
+let activeEventId          = null;  // event open in roster modal
+let editEventId            = null;  // event open in edit modal
+let dragSrcNum             = null;  // drag-reorder source student num
+let currentRosterStudents  = [];    // students array mirrored for compose modal
 
 // ── Settings ──────────────────────────────────────────────────────────────
 async function loadSettings() {
@@ -1420,6 +1458,7 @@ async function openEventRoster(id, course) {
 }
 
 function renderRosterTable(students, userSetPrefix, set, course) {
+  currentRosterStudents = students;   // keep a copy for the compose modal
   const tbody = document.getElementById('roster-tbody');
   tbody.innerHTML = students.map(s => {
     const username = `${userSetPrefix}-${String(s.num).padStart(set.padding || 2, '0')}`;
@@ -1584,6 +1623,61 @@ async function sendLoginLinks() {
     if (r.failed.length) console.warn('Failed sends:', r.failed);
   } catch (e) { toast(`Send failed: ${e.message}`); }
   finally { btn.disabled = false; }
+}
+
+// ── Ad-hoc email compose ─────────────────────────────────────────────────
+let composeRosterCache = [];  // students array for current compose session
+
+function openEmailCompose() {
+  // Pull students from the currently rendered roster
+  composeRosterCache = currentRosterStudents || [];
+  const list = document.getElementById('email-recipient-list');
+  if (!composeRosterCache.length) { toast('No students in roster yet.'); return; }
+
+  list.innerHTML = composeRosterCache.map(s => {
+    const hasEmail = !!s.email;
+    const label    = escHtml(s.name) + (s.email ? ` <span style="color:var(--text-muted);font-size:0.8rem">&lt;${escHtml(s.email)}&gt;</span>` : ' <span style="color:var(--danger);font-size:0.75rem">(no email)</span>');
+    return `<label style="display:flex;align-items:center;gap:8px;cursor:${hasEmail?'pointer':'default'}">
+      <input type="checkbox" data-num="${s.num}" ${hasEmail ? 'checked' : 'disabled'} style="accent-color:var(--accent)">
+      <span>#${s.num} — ${label}</span>
+    </label>`;
+  }).join('');
+
+  // Pre-fill subject with event context
+  const evTitle = document.getElementById('roster-title')?.textContent || '';
+  document.getElementById('compose-subject').value = evTitle ? `${evTitle} — Message from your instructor` : '';
+  document.getElementById('compose-body').value = '';
+  closeModal('modal-event-roster');
+  openModal('modal-email-compose');
+}
+
+function toggleAllRecipients(checked) {
+  document.querySelectorAll('#email-recipient-list input[type=checkbox]:not(:disabled)').forEach(cb => cb.checked = checked);
+}
+
+async function sendAdhocEmail() {
+  const subject = document.getElementById('compose-subject').value.trim();
+  const body    = document.getElementById('compose-body').value.trim();
+  if (!subject) { toast('Subject is required.'); return; }
+  if (!body)    { toast('Message body is required.'); return; }
+
+  const nums = [...document.querySelectorAll('#email-recipient-list input[type=checkbox]:checked')]
+    .map(cb => parseInt(cb.dataset.num, 10));
+  if (!nums.length) { toast('Select at least one recipient.'); return; }
+
+  const btn = document.getElementById('btn-compose-send');
+  btn.disabled = true;
+  btn.textContent = 'Sending…';
+  try {
+    const r = await api('POST', `/api/events/${activeEventId}/send-adhoc`, {
+      course: activeLab, subject, body, nums
+    });
+    toast(`Sent ${r.sent} email${r.sent !== 1 ? 's' : ''}${r.failed.length ? ` (${r.failed.length} failed)` : ''}`);
+    if (r.failed.length) console.warn('Failed:', r.failed);
+    closeModal('modal-email-compose');
+    openModal('modal-event-roster');
+  } catch (e) { toast(`Send failed: ${e.message}`); }
+  finally { btn.disabled = false; btn.textContent = 'Send'; }
 }
 
 // ── Shared HTML escape helper ──────────────────────────────────────────────
