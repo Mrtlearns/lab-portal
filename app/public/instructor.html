@@ -1554,7 +1554,11 @@ async function importStudentCSV(input) {
   const file = input.files[0];
   if (!file) return;
   const text = await file.text();
-  const rows = text.trim().split('\n').slice(1).map(line => {
+  const lines = text.trim().split('\n');
+  // Auto-detect header: skip first line only if it looks like a header (first cell is 'name' or 'Name' etc.)
+  const firstCell = lines[0]?.split(',')[0]?.replace(/^"|"$/g, '').trim().toLowerCase();
+  const dataLines = (firstCell === 'name' || firstCell === 'full name' || firstCell === 'student') ? lines.slice(1) : lines;
+  const rows = dataLines.map(line => {
     const parts = line.split(',').map(p => p.replace(/^"|"$/g, '').trim());
     return { name: parts[0] || '', email: parts[1] || '' };
   }).filter(r => r.name);
